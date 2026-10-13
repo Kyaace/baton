@@ -1,7 +1,7 @@
 # Newsboat Configuration for Baton System 1 Offline RSS Ingestion
 
 # Storage paths pointing to drive E: (WSL mount)
-cache-file "/mnt/e/dev/Antigravity/local_llm/baton/data/rss/cache.db"
+cache-file "/mnt/e/dev/Antigravity/baton/baton/data/rss/cache.db"
 
 # Data retention
 max-items  300

@@ -21,6 +21,10 @@ baton/data/rss/cache.db*
 baton/artifacts/
 baton/logs/*.log
 
+# Kiwix ZIM Wikipedia archives
+*.zim
+baton/data/wikipedia/*.zim
+
 # RF captures & raw SDR data
 *.wav
 *.raw

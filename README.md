@@ -29,6 +29,7 @@ Baton is completely decoupled and can be customized via environment variables:
 | `BATON_COLIBRI_START_CMD`| Optional hook command to start Colibrì | None |
 | `BATON_COLIBRI_STOP_CMD` | Optional hook command to stop Colibrì | CLI stop fallback |
 | `BATON_NEWSBOAT_DB`  | Path to custom Newsboat SQLite cache | `baton/data/rss/cache.db` |
+| `BATON_ZIM_PATH`     | Path to custom Kiwix Wikipedia `.zim` archive | Auto-detected / None |
 
 ## Quick Start
 

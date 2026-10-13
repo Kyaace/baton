@@ -2,17 +2,38 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Optional
 
-from smart_search.zim_reader import ZimReader
+try:
+    from baton.tools.zim_reader import ZimReader
+except ImportError:
+    from smart_search.zim_reader import ZimReader  # type: ignore
 
 
 def find_default_zim() -> Optional[Path]:
     """Locate the largest available Wikipedia ZIM archive."""
+    # Check explicit environment variable first
+    env_path = os.getenv("BATON_ZIM_PATH")
+    if env_path:
+        p = Path(env_path)
+        if p.exists() and p.stat().st_size > 1024 * 1024:
+            return p
+
+    package_wiki_dir = Path(__file__).resolve().parent.parent / "data" / "wikipedia"
+
     candidates = [
+        package_wiki_dir / "wikipedia_en_all_nopic_2026-06.zim",
+        package_wiki_dir / "wikipedia_en_movies_nopic_2026-07.zim",
+        Path("baton/data/wikipedia/wikipedia_en_all_nopic_2026-06.zim"),
+        Path("baton/data/wikipedia/wikipedia_en_movies_nopic_2026-07.zim"),
+        Path("data/wikipedia/wikipedia_en_all_nopic_2026-06.zim"),
+        Path("data/wikipedia/wikipedia_en_movies_nopic_2026-07.zim"),
         Path("smart_search/wikipedia/wikipedia_en_all_nopic_2026-06.zim"),
         Path("smart_search/wikipedia/wikipedia_en_movies_nopic_2026-07.zim"),
+        Path("E:/dev/Antigravity/local_llm/smart_search/wikipedia/wikipedia_en_all_nopic_2026-06.zim"),
+        Path("E:/dev/Antigravity/local_llm/smart_search/wikipedia/wikipedia_en_movies_nopic_2026-07.zim"),
         Path("E:/offline_data/zim/wikipedia_en_all_maxi.zim"),
         Path("D:/offline_data/zim/wikipedia_en_all_maxi.zim"),
     ]
@@ -20,16 +41,22 @@ def find_default_zim() -> Optional[Path]:
         if p.exists() and p.stat().st_size > 1024 * 1024:
             return p
 
-    # Fallback: scan smart_search/wikipedia
-    wiki_dir = Path("smart_search/wikipedia")
-    if wiki_dir.exists():
-        zims = sorted(
-            [f for f in wiki_dir.glob("*.zim") if f.stat().st_size > 1024 * 1024],
-            key=lambda x: x.stat().st_size,
-            reverse=True,
-        )
-        if zims:
-            return zims[0]
+    # Fallback: scan candidate directories
+    for search_dir in [
+        package_wiki_dir,
+        Path("baton/data/wikipedia"),
+        Path("data/wikipedia"),
+        Path("smart_search/wikipedia"),
+        Path("E:/dev/Antigravity/local_llm/smart_search/wikipedia"),
+    ]:
+        if search_dir.exists():
+            zims = sorted(
+                [f for f in search_dir.glob("*.zim") if f.stat().st_size > 1024 * 1024],
+                key=lambda x: x.stat().st_size,
+                reverse=True,
+            )
+            if zims:
+                return zims[0]
     return None
 
 
