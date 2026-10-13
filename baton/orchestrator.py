@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -98,6 +99,7 @@ class Orchestrator:
         params: Optional[dict[str, Any]] = None,
         depends_on: Optional[list[str]] = None,
         priority: int = 0,
+        scheduled_at: Optional[datetime] = None,
     ) -> Task:
         """Directly inject a user-specified task into the priority queue."""
         plan = DAGPlan(
@@ -113,6 +115,7 @@ class Orchestrator:
                     params=params,
                     depends_on=depends_on or [],
                     priority=priority,
+                    scheduled_at=scheduled_at,
                 )
             ],
         )
@@ -153,6 +156,7 @@ class Orchestrator:
         priority: int = 5,
         job_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        scheduled_at: Optional[datetime] = None,
     ) -> Task:
         """Creates a new task in the orchestrator database."""
         return self.db.create_task(
@@ -166,6 +170,7 @@ class Orchestrator:
             priority=priority,
             job_id=job_id,
             task_id=task_id,
+            scheduled_at=scheduled_at,
         )
 
     def get_task_artifact_text(self, task_id: str) -> Optional[str]:
@@ -337,12 +342,44 @@ class Orchestrator:
 
         return task
 
-    def run_all(self, max_steps: int = 50) -> list[Task]:
-        """Drives the queue until no runnable tasks remain."""
+    def run_all(
+        self,
+        max_steps: int = 50,
+        wait_for_scheduled: bool = False,
+        max_wait_seconds: Optional[float] = None,
+    ) -> list[Task]:
+        """Drives the queue until no runnable tasks remain.
+        If wait_for_scheduled is True, sleeps and waits for upcoming scheduled tasks.
+        """
         completed: list[Task] = []
         for _ in range(max_steps):
             task = self.step()
             if not task:
+                if wait_for_scheduled:
+                    next_scheduled = self.db.get_next_scheduled_task()
+                    if next_scheduled and next_scheduled.scheduled_at:
+                        now = datetime.now()
+                        delta = (next_scheduled.scheduled_at - now).total_seconds()
+                        if delta > 0:
+                            if max_wait_seconds is not None and delta > max_wait_seconds:
+                                logger.info(
+                                    "Next scheduled task exceeds max wait ceiling (%0.1fs > %0.1fs).",
+                                    delta,
+                                    max_wait_seconds,
+                                )
+                                break
+                            logger.info(
+                                "Sleeping %0.1fs for scheduled task '%s' at %s...",
+                                delta,
+                                next_scheduled.task_id,
+                                next_scheduled.scheduled_at,
+                            )
+                            deadline = time.time() + delta
+                            while time.time() < deadline:
+                                if getattr(self, "_cancel_requested", False):
+                                    break
+                                time.sleep(min(1.0, deadline - time.time()))
+                            continue
                 break
             completed.append(task)
         return completed

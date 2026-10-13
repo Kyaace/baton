@@ -43,6 +43,17 @@ def main() -> None:
     # Run
     run_parser = subparsers.add_parser("run", help="Run the queue until idle")
     run_parser.add_argument("--max-steps", type=int, default=20, help="Maximum tasks to execute")
+    run_parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Sleep and wait for scheduled alarms/tasks instead of exiting when idle",
+    )
+    run_parser.add_argument(
+        "--max-wait",
+        type=float,
+        default=None,
+        help="Maximum seconds to wait for scheduled tasks when --wait is enabled",
+    )
 
     # Submit
     submit_parser = subparsers.add_parser("submit", help="Submit a new project goal")
@@ -83,6 +94,11 @@ def main() -> None:
     new_parser.add_argument("--deps", nargs="*", default=[], help="Dependency task IDs")
     new_parser.add_argument("--priority", type=int, default=5, help="Task priority")
     new_parser.add_argument("--tool", default=None, help="Tool name (for System 1)")
+    new_parser.add_argument(
+        "--schedule",
+        default=None,
+        help="Schedule delay or ISO/time-of-day timestamp (e.g. '30m', '14:30', '2026-10-13T10:00:00')",
+    )
 
     args = parser.parse_args()
 
@@ -129,8 +145,12 @@ def main() -> None:
             console.print("[yellow]No runnable tasks in queue.[/]")
 
     elif args.command == "run":
-        console.print(f"[cyan]Running queue (up to {args.max_steps} steps)...[/]")
-        completed = orchestrator.run_all(max_steps=args.max_steps)
+        console.print(f"[cyan]Running queue (up to {args.max_steps} steps, wait={args.wait})...[/]")
+        completed = orchestrator.run_all(
+            max_steps=args.max_steps,
+            wait_for_scheduled=args.wait,
+            max_wait_seconds=args.max_wait,
+        )
         console.print(f"[green]Finished! Completed {len(completed)} tasks.[/]")
 
     elif args.command == "submit":
@@ -190,6 +210,14 @@ def main() -> None:
         t_type = None
         if args.task_type:
             t_type = TaskType(args.task_type)
+        scheduled_at = None
+        if getattr(args, "schedule", None):
+            from baton.tools.time_tool import parse_time_spec
+            try:
+                scheduled_at = parse_time_spec(args.schedule)
+            except Exception as e:
+                console.print(f"[red]Invalid --schedule specification:[/] {e}")
+                sys.exit(1)
         task = orchestrator.create_task(
             title=args.title,
             tier=Tier(args.tier),
@@ -198,10 +226,12 @@ def main() -> None:
             depends_on=args.deps,
             priority=args.priority,
             tool_name=args.tool,
+            scheduled_at=scheduled_at,
         )
+        sched_msg = f", scheduled: {task.scheduled_at.isoformat(sep=' ')}" if task.scheduled_at else ""
         console.print(
             f"[green]Created task:[/] [bold]{task.task_id}[/] "
-            f"({task.tier.value}, {task.task_type.value}, priority {task.priority}, status: {task.status.value})"
+            f"({task.tier.value}, {task.task_type.value}, priority {task.priority}, status: {task.status.value}{sched_msg})"
         )
 
 

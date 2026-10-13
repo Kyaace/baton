@@ -71,6 +71,7 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     started_at TIMESTAMP,
                     completed_at TIMESTAMP,
+                    scheduled_at TIMESTAMP,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
                 );
 
@@ -98,7 +99,14 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_tier_status ON tasks(tier, status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_job ON tasks(job_id);
+                CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(status, scheduled_at);
             """)
+
+            # Migration check: ensure scheduled_at exists on existing tables
+            table_info = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+            if table_info and "scheduled_at" not in table_info:
+                conn.execute("ALTER TABLE tasks ADD COLUMN scheduled_at TIMESTAMP")
+
 
     # -------------------------------------------------------------------------
     # Jobs Management
@@ -198,8 +206,8 @@ class Database:
                     """
                     INSERT INTO tasks (
                         task_id, job_id, title, tier, task_type, status,
-                        prompt_template, tool_name, tool_params, priority, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        prompt_template, tool_name, tool_params, priority, scheduled_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tp.id,
@@ -212,6 +220,7 @@ class Database:
                         tp.tool,
                         params_json,
                         tp.priority,
+                        tp.scheduled_at,
                         now,
                     ),
                 )
@@ -235,6 +244,7 @@ class Database:
                         tool_params=tp.params,
                         depends_on=tp.depends_on,
                         priority=tp.priority,
+                        scheduled_at=tp.scheduled_at,
                         created_at=now,
                     )
                 )
@@ -262,9 +272,12 @@ class Database:
     def get_runnable_tasks(
         self, job_id: Optional[str] = None, tier: Optional[Tier] = None
     ) -> list[Task]:
-        """Returns ready tasks ordered by priority (DESC) and creation time (ASC)."""
-        query = "SELECT * FROM tasks WHERE status = 'ready'"
-        params: list[Any] = []
+        """Returns ready tasks ordered by priority (DESC) and creation time (ASC).
+        Filters out tasks scheduled for the future.
+        """
+        now = datetime.now()
+        query = "SELECT * FROM tasks WHERE status = 'ready' AND (scheduled_at IS NULL OR scheduled_at <= ?)"
+        params: list[Any] = [now]
 
         if job_id:
             query += " AND job_id = ?"
@@ -288,6 +301,53 @@ class Database:
                 ]
                 tasks.append(self._row_to_task(r, deps))
             return tasks
+
+    def get_scheduled_tasks(
+        self, job_id: Optional[str] = None, tier: Optional[Tier] = None
+    ) -> list[Task]:
+        """Returns ready tasks that are deferred into the future."""
+        now = datetime.now()
+        query = "SELECT * FROM tasks WHERE status = 'ready' AND scheduled_at > ?"
+        params: list[Any] = [now]
+
+        if job_id:
+            query += " AND job_id = ?"
+            params.append(job_id)
+        if tier:
+            query += " AND tier = ?"
+            params.append(tier.value)
+
+        query += " ORDER BY scheduled_at ASC"
+
+        with self.get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            tasks: list[Task] = []
+            for r in rows:
+                deps = [
+                    d["depends_on_task_id"]
+                    for d in conn.execute(
+                        "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?",
+                        (r["task_id"],),
+                    ).fetchall()
+                ]
+                tasks.append(self._row_to_task(r, deps))
+            return tasks
+
+    def get_next_scheduled_task(
+        self, job_id: Optional[str] = None, tier: Optional[Tier] = None
+    ) -> Optional[Task]:
+        """Returns the earliest scheduled future task."""
+        scheduled = self.get_scheduled_tasks(job_id=job_id, tier=tier)
+        return scheduled[0] if scheduled else None
+
+    def set_task_schedule(self, task_id: str, scheduled_at: Optional[datetime]) -> bool:
+        """Sets or clears the scheduled execution time for a task."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE tasks SET scheduled_at = ? WHERE task_id = ?",
+                (scheduled_at, task_id),
+            )
+            return cursor.rowcount > 0
 
     def get_in_progress_tasks(self) -> list[Task]:
         """Returns all tasks currently marked IN_PROGRESS."""
@@ -361,6 +421,8 @@ class Database:
         priority: Optional[int] = None,
         tier: Optional[Tier | str] = None,
         depends_on: Optional[list[str]] = None,
+        scheduled_at: Optional[datetime | str] = None,
+        clear_schedule: bool = False,
     ) -> None:
         """Updates editable fields of an existing task and synchronizes dependencies and readiness."""
         updates: list[str] = []
@@ -384,6 +446,11 @@ class Database:
             tier_val = tier.value if isinstance(tier, Tier) else str(tier)
             updates.append("tier = ?")
             params.append(tier_val)
+        if clear_schedule:
+            updates.append("scheduled_at = NULL")
+        elif scheduled_at is not None:
+            updates.append("scheduled_at = ?")
+            params.append(scheduled_at)
 
         with self.get_connection() as conn:
             if updates:
@@ -425,6 +492,7 @@ class Database:
         priority: int = 5,
         job_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        scheduled_at: Optional[datetime] = None,
     ) -> Task:
         """Manually creates a new task with dependencies and inserts it into the queue."""
         tier_obj = Tier(tier) if isinstance(tier, str) else tier
@@ -474,8 +542,8 @@ class Database:
                 """
                 INSERT INTO tasks (
                     task_id, job_id, title, tier, task_type, status,
-                    prompt_template, tool_name, tool_params, priority, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt_template, tool_name, tool_params, priority, scheduled_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -488,6 +556,7 @@ class Database:
                     tool_name,
                     params_json,
                     priority,
+                    scheduled_at,
                     now,
                 ),
             )
@@ -510,6 +579,7 @@ class Database:
             tool_params=tool_params,
             depends_on=deps,
             priority=priority,
+            scheduled_at=scheduled_at,
             created_at=now,
         )
 
@@ -852,6 +922,17 @@ class Database:
     @staticmethod
     def _row_to_task(row: sqlite3.Row, deps: list[str]) -> Task:
         params = json.loads(row["tool_params"]) if row["tool_params"] else None
+        scheduled_at = None
+        if "scheduled_at" in row.keys() and row["scheduled_at"]:
+            val = row["scheduled_at"]
+            if isinstance(val, str):
+                try:
+                    scheduled_at = datetime.fromisoformat(val)
+                except Exception:
+                    scheduled_at = None
+            else:
+                scheduled_at = val
+
         return Task(
             task_id=row["task_id"],
             job_id=row["job_id"],
@@ -871,5 +952,6 @@ class Database:
             created_at=row["created_at"],
             started_at=row["started_at"],
             completed_at=row["completed_at"],
+            scheduled_at=scheduled_at,
             error_message=row["error_message"],
         )

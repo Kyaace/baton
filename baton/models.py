@@ -74,6 +74,7 @@ class TaskPlan(BaseModel):
     description: Optional[str] = None
     output_artifact: Optional[str] = None
     priority: int = 0
+    scheduled_at: Optional[datetime] = None
 
 
 class DAGPlan(BaseModel):
@@ -103,6 +104,7 @@ class Task(BaseModel):
     created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    scheduled_at: Optional[datetime] = None
     error_message: Optional[str] = None
 
 

@@ -95,6 +95,11 @@ def test_tool_schemas_validity():
         "sdr_decode_telemetry",
         "sdr_adsb_tracking",
         "sdr_decode_packet",
+        "get_current_time",
+        "schedule_task_alarm",
+        "create_scheduled_task",
+        "list_alarms",
+        "cancel_alarm",
     }
     assert required_tools.issubset(names)
 
@@ -111,11 +116,12 @@ def test_tool_shelf_dynamic_activation_and_deactivation(chat_session: BatonChatS
     assert "rss_search" not in initial_names
     assert "wiki_search" not in initial_names
     assert "python_eval" not in initial_names
+    assert "get_current_time" not in initial_names
     assert len(initial_schema) == len(SHELF_TOOLS_SCHEMA) + len(BATON_QUEUE_TOOLS_SCHEMA)
 
     # 2. Inspect shelf tool
     shelf_res = chat_session.execute_tool("list_tool_bundles", {})
-    assert len(shelf_res["shelf"]) == 6  # core, baton, wikipedia, newsboat, sandbox, sdr
+    assert len(shelf_res["shelf"]) == 7  # core, baton, wikipedia, newsboat, sandbox, sdr, time
     assert "core" in shelf_res["active_bundles"]
     assert "baton" in shelf_res["active_bundles"]
 

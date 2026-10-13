@@ -11,6 +11,7 @@
   - `newsboat`: Offline RSS news monitoring and reader across 12+ tech/science publications.
   - `sandbox`: Isolated Python AST verification, REPL evaluation, and pytest test suite execution.
   - `sdr`: RTL-SDR spectrum sweeps (`rtl_power`), carrier detection, audio recordings, and RF telemetry decoding.
+  - `time`: Real-world UTC and local time grounding, timezone offsets, and task alarm scheduling (deferring or waking up tasks in the future).
 - **System 2 (Deep Macro-Planner / Synthesizer):** Frontier MoE model (e.g. DeepSeek-V4-Flash via Colibrì @ ~0.8 tok/s) that operates tool-blind, consuming briefing dossiers compiled by System 1 to synthesize structured task plans and complete codebase implementations.
 - **Mode A Mutual Exclusion:** Dynamically stops and starts the respective model engines to guarantee 100% exclusive GPU VRAM allocation.
 

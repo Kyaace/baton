@@ -38,6 +38,7 @@ from baton.orchestrator import Orchestrator
 from baton.tools.newsboat import NewsboatTool
 from baton.tools.sandbox import SandboxTool
 from baton.tools.sdr import SdrTool
+from baton.tools.time_tool import TimeTool
 from baton.tools.zim import ZimTool
 
 logger = logging.getLogger("baton.chat")
@@ -72,8 +73,8 @@ SHELF_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "properties": {
                     "bundle_name": {
                         "type": "string",
-                        "enum": ["baton", "wikipedia", "newsboat", "sandbox", "sdr"],
-                        "description": "Name of the tool bundle to activate ('baton', 'wikipedia', 'newsboat', 'sandbox', or 'sdr').",
+                        "enum": ["baton", "wikipedia", "newsboat", "sandbox", "sdr", "time"],
+                        "description": "Name of the tool bundle to activate ('baton', 'wikipedia', 'newsboat', 'sandbox', 'sdr', or 'time').",
                     },
                 },
                 "required": ["bundle_name"],
@@ -90,8 +91,8 @@ SHELF_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "properties": {
                     "bundle_name": {
                         "type": "string",
-                        "enum": ["baton", "wikipedia", "newsboat", "sandbox", "sdr"],
-                        "description": "Name of the tool bundle to deactivate ('baton', 'wikipedia', 'newsboat', 'sandbox', or 'sdr').",
+                        "enum": ["baton", "wikipedia", "newsboat", "sandbox", "sdr", "time"],
+                        "description": "Name of the tool bundle to deactivate ('baton', 'wikipedia', 'newsboat', 'sandbox', 'sdr', or 'time').",
                     },
                 },
                 "required": ["bundle_name"],
@@ -797,6 +798,115 @@ SDR_TOOLS_SCHEMA: list[dict[str, Any]] = [
     },
 ]
 
+# -----------------------------------------------------------------------------
+# 7. Time & Alarm Scheduling Schema ('time' bundle)
+# -----------------------------------------------------------------------------
+
+TIME_TOOLS_SCHEMA: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": "Returns current local system time, UTC time, timezone name/offset, and Unix timestamp.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_task_alarm",
+            "description": "Defers or schedules an existing task in the queue to wake up and execute at a specific future time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the existing task to schedule (e.g. 'task_123').",
+                    },
+                    "when": {
+                        "type": "string",
+                        "description": "When to run the task. Accepts relative delays ('30m', 'in 2 hours', '1h 30m') or absolute ISO times ('2026-10-13T14:30:00', '14:30').",
+                    },
+                },
+                "required": ["task_id", "when"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_scheduled_task",
+            "description": "Creates a new task in the queue scheduled for a future wake-up execution time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Title of the task.",
+                    },
+                    "when": {
+                        "type": "string",
+                        "description": "Target execution time ('30m', 'in 2 hours', '14:30', or ISO-8601).",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed instructions/prompt for the task.",
+                    },
+                    "tier": {
+                        "type": "string",
+                        "enum": ["system_1", "system_2"],
+                        "description": "Execution tier ('system_1' or 'system_2'). Defaults to 'system_1'.",
+                    },
+                    "tool": {
+                        "type": "string",
+                        "description": "Optional specific tool name to execute.",
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": "Priority (higher runs earlier once ready, default 5).",
+                    },
+                },
+                "required": ["title", "when"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_alarms",
+            "description": "Lists all pending scheduled task alarms with remaining countdowns.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_alarm",
+            "description": "Clears a scheduled alarm on a task, optionally making it immediately runnable.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the task to clear schedule for.",
+                    },
+                    "run_now": {
+                        "type": "boolean",
+                        "description": "If True (default), makes the task immediately runnable.",
+                    },
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
+]
+
 # Backward compatibility alias
 CORE_TOOLS_SCHEMA = SHELF_TOOLS_SCHEMA
 
@@ -847,6 +957,13 @@ TOOL_BUNDLES: dict[str, dict[str, Any]] = {
         "tools": SDR_TOOLS_SCHEMA,
         "always_active": False,
     },
+    "time": {
+        "name": "time",
+        "title": "Wall-Clock Time & Task Alarm Scheduler",
+        "description": "Real-world UTC and local time, timezone information, and task alarm scheduling (deferring or waking up tasks at specific future times).",
+        "tools": TIME_TOOLS_SCHEMA,
+        "always_active": False,
+    },
 }
 
 # Full combined schema list for backwards compatibility
@@ -857,6 +974,7 @@ BATON_TOOLS_SCHEMA: list[dict[str, Any]] = (
     + NEWSBOAT_TOOLS_SCHEMA
     + SANDBOX_TOOLS_SCHEMA
     + SDR_TOOLS_SCHEMA
+    + TIME_TOOLS_SCHEMA
 )
 
 # -----------------------------------------------------------------------------
@@ -878,8 +996,9 @@ To prevent context window bloat and tool distraction, tools are organized into m
 - 'newsboat' (ON SHELF): Offline RSS news monitoring across 12+ tech/science feeds (Ars Technica, Nature, NASA, MIT Tech Review, Krebs, etc.).
 - 'sandbox' (ON SHELF): Isolated Python execution, AST syntax verification, and pytest test suite runner.
 - 'sdr' (ON SHELF): RTL-SDR RF spectrum analysis, carrier detection, audio recording, and telemetry decoding.
+- 'time' (ON SHELF): Real-world UTC and local system time, timezone grounding, and task alarm scheduling (deferring or waking up tasks in the future).
 
-If you need capabilities from an inactive bundle on the shelf, call `activate_tool_bundle(bundle_name="baton" | "wikipedia" | "newsboat" | "sandbox" | "sdr")`.
+If you need capabilities from an inactive bundle on the shelf, call `activate_tool_bundle(bundle_name="baton" | "wikipedia" | "newsboat" | "sandbox" | "sdr" | "time")`.
 Once activated, those tools immediately become available on your toolbelt for subsequent tool calls.
 You can return a bundle to the shelf when finished using `deactivate_tool_bundle(bundle_name=...)` to free context tokens.
 
@@ -912,6 +1031,7 @@ class BatonChatSession:
         newsboat_tool: Optional[NewsboatTool] = None,
         sandbox_tool: Optional[SandboxTool] = None,
         sdr_tool: Optional[SdrTool] = None,
+        time_tool: Optional[TimeTool] = None,
         engine_mgr: Optional[EngineManager] = None,
         model_name: Optional[str] = None,
         ollama_url: Optional[str] = None,
@@ -925,6 +1045,7 @@ class BatonChatSession:
         self._newsboat_tool = newsboat_tool
         self._sandbox_tool = sandbox_tool
         self._sdr_tool = sdr_tool
+        self._time_tool = time_tool
         self.ollama_url = (
             ollama_url
             or getattr(self.engine_mgr, "ollama_url", None)
@@ -1030,6 +1151,16 @@ class BatonChatSession:
                 logger.warning("Could not initialize SdrTool: %s", e)
                 self._sdr_tool = None  # type: ignore[assignment]
         return self._sdr_tool
+
+    @property
+    def time_tool(self) -> TimeTool:
+        if self._time_tool is None:
+            try:
+                self._time_tool = TimeTool(db=self.db)
+            except Exception as e:
+                logger.warning("Could not initialize TimeTool: %s", e)
+                self._time_tool = None  # type: ignore[assignment]
+        return self._time_tool
 
     def get_active_tools_schema(self) -> list[dict[str, Any]]:
         """Compiles the list of JSON tool schemas strictly for currently active bundles."""
@@ -1423,6 +1554,18 @@ class BatonChatSession:
                     gain_db=float(args.get("gain_db", 40.0)),
                 )
 
+            # Time & Alarm Bundle Tools ('time')
+            elif name in (
+                "get_current_time",
+                "schedule_task_alarm",
+                "create_scheduled_task",
+                "list_alarms",
+                "cancel_alarm",
+            ):
+                if not self.time_tool:
+                    return {"error": "TimeTool is not available."}
+                return {"result": self.time_tool.execute(name, args)}
+
             else:
                 return {"error": f"Unknown tool name: '{name}'"}
 
@@ -1669,6 +1812,20 @@ class BatonChatSession:
                 console.print("[red]SdrTool is not available.[/]")
             return True
 
+        elif cmd == "/time":
+            if self.time_tool:
+                console.print(Markdown(self.time_tool.format_time_markdown()))
+            else:
+                console.print("[red]TimeTool is not available.[/]")
+            return True
+
+        elif cmd in ("/alarms", "/alarm"):
+            if self.time_tool:
+                console.print(Markdown(self.time_tool.list_alarms()))
+            else:
+                console.print("[red]TimeTool is not available.[/]")
+            return True
+
         return False
 
     # -------------------------------------------------------------------------
@@ -1720,9 +1877,11 @@ class BatonChatSession:
         table.add_row("/sdr", "Probe RTL-SDR hardware and tuner status")
         table.add_row("/adsb [seconds]", "Scan Mode-S ADS-B 1090 MHz aircraft radar")
         table.add_row("/telemetry [preset]", "Listen for sensor telemetry (us_smart_meters, us_tpms, eu_sensors)")
+        table.add_row("/time", "Display current system time (local & UTC)")
+        table.add_row("/alarms", "List scheduled task alarms and countdowns")
         table.add_row("/clear", "Clear terminal screen")
         table.add_row("/exit or /quit", "Leave chat mode")
-        table.add_row("[dim]Autonomous Shelf[/]", "[dim]Agent automatically calls activate_tool_bundle('baton'|'sandbox'|'newsboat'|'wikipedia'|'sdr') on demand.[/]")
+        table.add_row("[dim]Autonomous Shelf[/]", "[dim]Agent automatically calls activate_tool_bundle('baton'|'sandbox'|'newsboat'|'wikipedia'|'sdr'|'time') on demand.[/]")
         console.print(table)
 
     def print_task_table(self, filter_status: str = "") -> None:
