@@ -94,11 +94,44 @@ class TaskPlan(BaseModel):
     scheduled_at: Optional[datetime] = None
 
 
+from graphlib import TopologicalSorter, CycleError
+
+
 class DAGPlan(BaseModel):
     """A directed acyclic graph plan emitted by System 2 Macro-Planner."""
     project: str
     goal: str
     tasks: list[TaskPlan]
+
+    def validate_dag(self) -> None:
+        """
+        Validates the DAG plan deterministically:
+        1. No duplicate task IDs.
+        2. No dangling dependency references (depends_on refers to existing task IDs).
+        3. Strict acyclicity (no circular dependency loops).
+        Raises ValueError if any validation rule is violated.
+        """
+        task_ids: set[str] = set()
+        for t in self.tasks:
+            if t.id in task_ids:
+                raise ValueError(f"Duplicate task ID in plan: '{t.id}'")
+            task_ids.add(t.id)
+
+        graph: dict[str, set[str]] = {}
+        for t in self.tasks:
+            deps = set(t.depends_on)
+            dangling = deps - task_ids
+            if dangling:
+                raise ValueError(
+                    f"Task '{t.id}' has dangling dependencies not defined in plan: {sorted(dangling)}"
+                )
+            graph[t.id] = deps
+
+        ts = TopologicalSorter(graph)
+        try:
+            ts.prepare()
+        except CycleError as e:
+            raise ValueError(f"Circular dependency detected in plan: {e}") from e
 
 
 class BriefingDossier(BaseModel):
@@ -108,6 +141,41 @@ class BriefingDossier(BaseModel):
     equations_or_apis: list[str] = Field(default_factory=list, description="Exact equations, formulas, type signatures, or API interfaces")
     open_questions: list[str] = Field(default_factory=list, description="Unresolved ambiguities or edge cases")
     source_citations: list[str] = Field(default_factory=list, description="Sources, files, or citations referenced")
+
+    @property
+    def word_count(self) -> int:
+        """Returns word count of the compact markdown format."""
+        return len(self.to_compact_markdown().split())
+
+    def compact_truncate(self, max_words: int = 300) -> str:
+        """
+        Deterministically produces a compact markdown rendering guaranteed to be
+        under max_words, prioritizing summary, core facts, and equations/APIs over citations.
+        """
+        rendered = self.to_compact_markdown()
+        words = rendered.split()
+        if len(words) <= max_words:
+            return rendered
+
+        # Progressive truncation: prioritize summary, core facts, equations
+        parts = [f"## Summary: {self.summary.strip()}"]
+        if self.core_facts:
+            facts = "\n".join(f"- {f.strip()}" for f in self.core_facts if f.strip())
+            parts.append(f"### Core Facts\n{facts}")
+        if self.equations_or_apis:
+            eqs = "\n".join(
+                f"- `{eq.strip()}`" if not eq.strip().startswith("`") and not eq.strip().startswith("```") else f"- {eq.strip()}"
+                for eq in self.equations_or_apis if eq.strip()
+            )
+            parts.append(f"### Equations & APIs\n{eqs}")
+
+        trimmed = "\n\n".join(parts)
+        trimmed_words = trimmed.split()
+        if len(trimmed_words) <= max_words:
+            return trimmed
+
+        # Hard truncate to word boundary if still over
+        return " ".join(trimmed_words[:max_words]) + " ... [budget ceiling reached]"
 
     def to_compact_markdown(self) -> str:
         """Renders the dossier into an ultra-compact, token-dense format stripping conversational fluff."""

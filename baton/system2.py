@@ -311,8 +311,13 @@ class System2Runner:
     # Macro-Planning: Decomposes User Goal into a Structured DAG
     # -------------------------------------------------------------------------
 
-    def plan_project(self, project_name: str, goal: str) -> DAGPlan:
-        """Prompts System 2 to decompose the goal into a valid typed Task DAG."""
+    def plan_project(
+        self,
+        project_name: str,
+        goal: str,
+        system1_repair_runner: Optional[Any] = None,
+    ) -> DAGPlan:
+        """Prompts System 2 to decompose the goal into a valid typed Task DAG with outbound airlock validation."""
         system_prompt = (
             "You are Baton System 2: Chief Architect & Macro-Planner.\n"
             "Your role is to decompose high-level projects into a Directed Acyclic Graph (DAG) of discrete tasks.\n"
@@ -375,8 +380,24 @@ class System2Runner:
         clean_json = re.sub(r"^```(?:json)?\s*", "", raw_json, flags=re.MULTILINE)
         clean_json = re.sub(r"\s*```$", "", clean_json, flags=re.MULTILINE).strip()
 
-        data = json.loads(clean_json)
-        return DAGPlan.model_validate(data)
+        try:
+            data = json.loads(clean_json)
+            plan = DAGPlan.model_validate(data)
+            plan.validate_dag()
+            return plan
+        except Exception as e:
+            logger.warning("Outbound DAG Airlock: System 2 output validation failed: %s", e)
+            if system1_repair_runner is not None:
+                from baton.system1 import repair_dag_plan_json
+                logger.info("Engaging System 1 outbound airlock repair for System 2 DAGPlan...")
+                repaired_plan, repair_msg = repair_dag_plan_json(
+                    system1_repair_runner, raw_json, str(e)
+                )
+                if repaired_plan is not None:
+                    logger.info("Outbound DAG Airlock: System 1 successfully repaired plan: %s", repair_msg)
+                    return repaired_plan
+                logger.warning("System 1 repair also failed: %s", repair_msg)
+            raise
 
     @staticmethod
     def sort_upstream_dossiers(

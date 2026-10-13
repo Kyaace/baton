@@ -5,6 +5,7 @@ Powered by Qwen3:14B via Ollama and equipped with offline knowledge tools (ZimRe
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import requests
 from baton.models import (
     ArtifactType,
     BriefingDossier,
+    DAGPlan,
     RFDossier,
     Task,
     TaskCancelledError,
@@ -124,6 +126,133 @@ def compress_traceback(raw_trace: str, max_chars: int = 1500) -> str:
     return compressed or raw_trace[-max_chars:]
 
 
+def validate_delimiters(text: str) -> tuple[bool, str]:
+    """
+    Deterministically checks that brackets (), [], {} and markdown code fences ```
+    are properly balanced and closed.
+    Returns: (is_valid, reason)
+    """
+    # 1. Check code fences
+    fence_matches = re.findall(r"^```|\n```", text)
+    if len(fence_matches) % 2 != 0:
+        return False, "Unclosed code fence (```)"
+
+    # 2. Check brackets outside of code fences
+    non_code = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    stack: list[str] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    openers = set(pairs.values())
+
+    for char in non_code:
+        if char in openers:
+            stack.append(char)
+        elif char in pairs:
+            if not stack or stack[-1] != pairs[char]:
+                return False, f"Mismatched delimiter '{char}'"
+            stack.pop()
+
+    if stack:
+        return False, f"Unclosed delimiter '{stack[-1]}'"
+
+    return True, ""
+
+
+def validate_embedded_code_syntax(text: str) -> tuple[bool, list[str]]:
+    """
+    Extracts all ```python ... ``` code snippets and verifies AST syntax validity.
+    Returns: (all_valid, list_of_syntax_errors)
+    """
+    snippets = re.findall(r"```(?:python)?\s*\n(.*?)\n```", text, flags=re.DOTALL | re.IGNORECASE)
+    errors: list[str] = []
+    for i, snippet in enumerate(snippets, 1):
+        if not snippet.strip():
+            continue
+        try:
+            ast.parse(snippet)
+        except SyntaxError as e:
+            errors.append(f"Snippet {i} syntax error on line {e.lineno}: {e.msg}")
+
+    return (len(errors) == 0, errors)
+
+
+def generate_diagnostic_dossier(failure_trace: str, code: str = "", max_words: int = 150) -> str:
+    """
+    Deterministically distills an ultra-compact (<= 150 words) failure diagnostic
+    focusing purely on root causes, failing assertions, and key error lines.
+    """
+    if not failure_trace:
+        return "No diagnostic trace available."
+
+    lines = failure_trace.strip().splitlines()
+    high_signal = []
+    for line in lines:
+        l_lower = line.lower()
+        if any(k in l_lower for k in ("assertionerror", "syntaxerror", "nameerror", "importerror", "typeerror", "valueerror", "failed", "error:")):
+            high_signal.append(line.strip())
+        elif line.strip().startswith(">") or line.strip().startswith("E "):
+            high_signal.append(line.strip())
+
+    if not high_signal:
+        high_signal = [lines[-1].strip()] if lines else ["Execution failed."]
+
+    body = "\n".join(high_signal[:8])
+    words = body.split()
+    if len(words) > max_words:
+        body = " ".join(words[:max_words]) + " ... [diagnostic truncated]"
+
+    return f"Root Cause Analysis:\n{body}"
+
+
+def repair_dag_plan_json(
+    runner: System1Runner,
+    raw_text: str,
+    error_msg: str,
+) -> tuple[Optional[DAGPlan], str]:
+    """
+    One-shot System 1 fast repair for malformed or cyclic DAGPlan JSON output
+    from System 2. Prevents costly System 2 wakeups.
+    """
+    system_prompt = (
+        "You are Baton System 1: an autonomous JSON Syntactic Repair Worker.\n"
+        "Your task is to fix syntax errors, missing fields, or cyclic dependencies in a DAG plan JSON.\n"
+        "Output ONLY valid JSON matching this schema:\n"
+        "{\n"
+        '  "project": "...",\n'
+        '  "goal": "...",\n'
+        '  "tasks": [\n'
+        '    {\n'
+        '      "id": "task_id",\n'
+        '      "title": "title",\n'
+        '      "type": "fast_recon" or "deep_synthesis" or "fast_verify",\n'
+        '      "tier": "system_1" or "system_2",\n'
+        '      "depends_on": ["upstream_id"],\n'
+        '      "prompt": "instructions",\n'
+        '      "priority": 1\n'
+        '    }\n'
+        '  ]\n'
+        "}\n"
+        "Ensure all task IDs are unique and the graph is strictly acyclic.\n"
+        "Output ONLY the corrected JSON. Zero pleasantries."
+    )
+    user_prompt = (
+        f"Validation Error:\n{error_msg}\n\n"
+        f"Raw Malformed Output from System 2:\n{raw_text[:3000]}\n\n"
+        f"Fix the JSON syntax and dependencies now:"
+    )
+    try:
+        res = runner.generate(user_prompt, system_prompt=system_prompt, stream=False, format="json")
+        repaired_text = res["response"]
+        clean = re.sub(r"^```(?:json)?\s*", "", repaired_text, flags=re.MULTILINE)
+        clean = re.sub(r"\s*```$", "", clean, flags=re.MULTILINE).strip()
+        data = json.loads(clean)
+        plan = DAGPlan.model_validate(data)
+        plan.validate_dag()
+        return plan, "System 1 successfully repaired System 2 DAG plan"
+    except Exception as e:
+        logger.warning("System 1 DAG repair failed: %s", e)
+        return None, str(e)
+
+
 class System1Runner:
     """System 1 Recon Worker: Executes offline lookups and builds condensed briefing dossiers."""
 
@@ -136,7 +265,7 @@ class System1Runner:
         newsboat_tool: Optional[Any] = None,
         sandbox_tool: Optional[Any] = None,
         sdr_tool: Optional[Any] = None,
-        max_repair_retries: int = 2,
+        max_repair_retries: int = 3,
         structured_output: bool = True,
     ):
         self.ollama_url = (
@@ -562,6 +691,43 @@ class System1Runner:
         tokens = gen_result["tokens_generated"]
         elapsed = time.time() - t0
 
+        # Inbound Pre-Flight Airlock Gate (for System 2 inbound briefing dossiers)
+        if not is_verify and not is_sdr:
+            word_count = len(dossier_content.split())
+            if word_count > 300:
+                logger.info("Dossier exceeds 300-word density budget (%d words). Triggering single-pass recompression.", word_count)
+                recomp_prompt = (
+                    f"The following briefing dossier exceeds the 300-word density budget (current: {word_count} words).\n"
+                    f"Condense it strictly into fewer than 250 words without losing core facts, equations, or API signatures.\n"
+                    f"Current Dossier:\n{dossier_content}\n\n"
+                    f"Output ONLY valid JSON matching the schema."
+                )
+                try:
+                    recomp_res = self.generate(recomp_prompt, system_prompt=system_prompt, stream=False, format="json")
+                    recomp_content, recomp_model = parse_structured_dossier(recomp_res["response"], is_verify=False, is_sdr=False)
+                    if recomp_model and recomp_model.word_count <= 350:
+                        dossier_content = recomp_content
+                        parsed_model = recomp_model
+                    elif parsed_model and hasattr(parsed_model, "compact_truncate"):
+                        dossier_content = parsed_model.compact_truncate(300)
+                except Exception as e:
+                    logger.debug("Recompression pass failed: %s", e)
+                    if parsed_model and hasattr(parsed_model, "compact_truncate"):
+                        dossier_content = parsed_model.compact_truncate(300)
+
+            # Delimiter integrity check
+            valid_delims, delim_err = validate_delimiters(dossier_content)
+            if not valid_delims:
+                logger.warning("Dossier delimiter check flagged: %s. Auto-sanitizing unclosed fences.", delim_err)
+                if delim_err.startswith("Unclosed code fence"):
+                    dossier_content += "\n```"
+
+            # Embedded code syntax validation
+            valid_code, code_errs = validate_embedded_code_syntax(dossier_content)
+            if not valid_code:
+                logger.warning("Dossier contains invalid Python code snippet: %s", code_errs)
+                dossier_content += f"\n\n> [!WARNING]\n> Sanitizer Warning: Embedded code snippet has syntax errors: {', '.join(code_errs)}"
+
         # Step 4: Write Dossier Artifact
         artifact_filename = f"{task.task_id}_dossier.md"
         artifact_path = self.artifacts_dir / artifact_filename
@@ -574,8 +740,9 @@ class System1Runner:
 
         if is_verify and has_verification_error:
             logger.warning("Verification failed and local repairs exhausted for '%s'.", task.task_id)
+            diag = generate_diagnostic_dossier(raw_tool_data, target_code_str, max_words=150)
             raise VerificationFailedError(
-                message=summary_snippet,
+                message=f"{summary_snippet}\n\n{diag}",
                 artifact_path=str(artifact_path),
                 failure_trace=raw_tool_data,
                 target_code=target_code_str,

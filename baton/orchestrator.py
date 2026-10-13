@@ -77,7 +77,10 @@ class Orchestrator:
             logger.info("Submitting goal to System 2 for macro-planning...")
             self.engine_mgr.switch_to_tier(Tier.SYSTEM_2)
             try:
-                dag_plan = self.system2.plan_project(project, goal)
+                try:
+                    dag_plan = self.system2.plan_project(project, goal, system1_repair_runner=self.system1)
+                except TypeError:
+                    dag_plan = self.system2.plan_project(project, goal)
                 self.db.ingest_dag_plan(job.job_id, dag_plan)
                 logger.info("Ingested %d tasks from System 2 plan.", len(dag_plan.tasks))
             except Exception as e:
@@ -472,10 +475,10 @@ class Orchestrator:
         repair_id = f"repair_{verify_task.task_id}"
 
         prompt = (
-            f"Automated verification failed and System 1 local repairs were exhausted.\n\n"
-            f"### Diagnostics:\n{error.message}\n\n"
-            f"### Failure Traceback:\n```text\n{error.failure_trace}\n```\n\n"
-            f"Fix and regenerate the complete, working implementation."
+            f"Automated verification failed and System 1 local repairs were exhausted (Fast-Patch Ladder Tier 2 Escalation).\n\n"
+            f"### Failure Diagnostic Dossier:\n{error.message}\n\n"
+            f"### Condensed Traceback:\n```text\n{error.failure_trace[:2000]}\n```\n\n"
+            f"Rethink the algorithm and regenerate the complete, working implementation."
         )
 
         # 1. Create the repair task first so it exists in tasks table
