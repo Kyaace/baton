@@ -152,7 +152,9 @@ baton/
 
 ## 5. Running Unit Tests
 
-Run the complete Baton test suite (58 tests):
+Run the complete Baton test suite:
 ```powershell
-& "C:\ProgramData\Anaconda3\python.exe" -m pytest baton\tests\ -v
+pytest baton/tests/ -v
+# or
+python -m pytest baton/tests/ -v
 ```

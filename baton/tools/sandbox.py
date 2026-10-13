@@ -21,11 +21,25 @@ logger = logging.getLogger("baton.tools.sandbox")
 
 
 def get_default_python_executable() -> str:
-    """Finds the preferred Python executable, defaulting to Anaconda3 if present."""
+    """
+    Finds the preferred Python executable for sandboxed execution.
+    Prioritizes the active Python interpreter (sys.executable) or active virtualenv/conda,
+    falling back to Anaconda3 or system PATH python.
+    """
+    if sys.executable and Path(sys.executable).exists():
+        return sys.executable
+    if "VIRTUAL_ENV" in os.environ:
+        venv_py = Path(os.environ["VIRTUAL_ENV"]) / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+        if venv_py.exists():
+            return str(venv_py)
+    if "CONDA_PREFIX" in os.environ:
+        conda_py = Path(os.environ["CONDA_PREFIX"]) / ("python.exe" if os.name == "nt" else "bin/python")
+        if conda_py.exists():
+            return str(conda_py)
     conda_exe = Path("C:/ProgramData/Anaconda3/python.exe")
     if conda_exe.exists():
         return str(conda_exe)
-    return sys.executable
+    return "python"
 
 
 def windows_safe_run(

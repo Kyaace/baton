@@ -104,13 +104,14 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_tier_status ON tasks(tier, status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_job ON tasks(job_id);
-                CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(status, scheduled_at);
             """)
 
-            # Migration check: ensure scheduled_at exists on existing tables
+            # Migration check: ensure scheduled_at exists on existing tables before creating index
             table_info = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
             if table_info and "scheduled_at" not in table_info:
                 conn.execute("ALTER TABLE tasks ADD COLUMN scheduled_at TIMESTAMP")
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(status, scheduled_at);")
 
 
     # -------------------------------------------------------------------------
