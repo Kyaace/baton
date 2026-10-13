@@ -46,6 +46,14 @@ def check_degenerate_repetition(text: str, min_chars: int = 60) -> bool:
     return False
 
 
+STATIC_SYNTHESIS_SYSTEM_PROMPT = (
+    "You are Baton System 2: Deep Synthesizer & Principal Engineer.\n"
+    "You write complete, production-grade, mathematically rigorous implementations and specifications.\n"
+    "Include zero placeholders, ellipses (...), or pseudo-code.\n"
+    "Every function, formula, and class must be fully written and tested."
+)
+
+
 class System2Runner:
     """System 2 Deep Worker: Macro-Planning (Task DAGs) and Deep Nocturnal Synthesis."""
 
@@ -57,6 +65,7 @@ class System2Runner:
         max_prompt_tokens: int = 1200,
         auto_continue: bool = True,
         max_continuations: int = 3,
+        cache_prompt: bool = True,
     ):
         self.colibri_url = (
             colibri_url
@@ -71,6 +80,7 @@ class System2Runner:
         self.max_prompt_tokens = max_prompt_tokens
         self.auto_continue = auto_continue
         self.max_continuations = max_continuations
+        self.cache_prompt = cache_prompt
         self._cancel_requested = False
         self._active_response: Optional[requests.Response] = None
 
@@ -114,20 +124,31 @@ class System2Runner:
         initial_tokens: int = 0,
         initial_content: str = "",
         initial_reasoning: str = "",
+        cache_prompt: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Calls Colibrì OpenAI-compatible chat completion endpoint with optional SSE streaming."""
         endpoint = f"{self.colibri_url}/v1/chat/completions"
         active_model = self.get_model_id()
+        use_cache = self.cache_prompt if cache_prompt is None else cache_prompt
+
         payload: dict[str, Any] = {
             "model": active_model,
             "messages": messages,
             "temperature": temperature,
             "stream": stream,
         }
+        if use_cache:
+            # Tell llama.cpp / Colibri to pin and reuse prompt KV cache
+            payload["cache_prompt"] = True
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if stream:
             payload["stream_options"] = {"include_usage": True}
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-Baton-Cache-Prefix": "pinned" if use_cache else "bypass",
+        }
 
         t0 = time.time()
         self._cancel_requested = False
@@ -135,7 +156,7 @@ class System2Runner:
         if not stream:
             if self._cancel_requested:
                 raise TaskCancelledError("System 2 generation stopped by user.")
-            res = requests.post(endpoint, json=payload, timeout=timeout)
+            res = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
             res.raise_for_status()
             data = res.json()
             elapsed = time.time() - t0
@@ -157,7 +178,7 @@ class System2Runner:
 
         # Streaming mode (SSE)
         try:
-            res = requests.post(endpoint, json=payload, stream=True, timeout=timeout)
+            res = requests.post(endpoint, json=payload, headers=headers, stream=True, timeout=timeout)
             res.raise_for_status()
             self._active_response = res
 
@@ -357,6 +378,63 @@ class System2Runner:
         data = json.loads(clean_json)
         return DAGPlan.model_validate(data)
 
+    @staticmethod
+    def sort_upstream_dossiers(
+        upstream_dossiers: Optional[list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """Sorts upstream dossiers deterministically by completed_at, task_id, and title."""
+        if not upstream_dossiers:
+            return []
+        return sorted(
+            upstream_dossiers,
+            key=lambda d: (
+                str(d.get("completed_at") or ""),
+                str(d.get("task_id") or ""),
+                str(d.get("title") or ""),
+            ),
+        )
+
+    def build_canonical_prompt(
+        self,
+        task: Task,
+        upstream_dossiers: Optional[list[dict[str, Any]]] = None,
+    ) -> list[dict[str, str]]:
+        """
+        Builds canonical, prefix-pinned messages for System 2 synthesis.
+        Enforces strict ordering to maximize KV-cache reuse in Colibrì:
+        1. Static System Prompt (invariant, zero timestamps or dynamic tokens)
+        2. User Message:
+           a. Immutable Upstream Briefing Dossiers (sorted deterministically)
+           b. Task Objective and Instructions
+           c. Action Directive
+        """
+        prompt_parts: list[str] = []
+
+        # 1. Immutable Upstream Context/Dossiers (sorted deterministically)
+        sorted_dossiers = self.sort_upstream_dossiers(upstream_dossiers)
+        if sorted_dossiers:
+            prompt_parts.append("## Briefing Dossiers from System 1 Reconnaissance:")
+            for d in sorted_dossiers:
+                payload = d.get("result_payload", "").strip()
+                max_chars = int((self.max_prompt_tokens / max(len(sorted_dossiers), 1)) * 3.5)
+                budgeted_payload = payload[:max_chars]
+                title = d.get("title") or "Dossier"
+                prompt_parts.append(f"### Upstream Finding: {title}\n{budgeted_payload}\n")
+
+        # 2. Task Goal / Instructions
+        prompt_parts.append(f"# Objective: {task.title}")
+        prompt_parts.append(f"Instructions:\n{task.prompt_template or ''}")
+
+        # 3. Action Directive
+        prompt_parts.append("\nGenerate the complete, robust implementation now:")
+
+        full_user_prompt = "\n".join(prompt_parts)
+
+        return [
+            {"role": "system", "content": STATIC_SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": full_user_prompt},
+        ]
+
     # -------------------------------------------------------------------------
     # Deep Synthesis: Nocturnal Code & Specification Generation
     # -------------------------------------------------------------------------
@@ -375,34 +453,7 @@ class System2Runner:
         Returns: (result_summary, artifact_path, tokens_generated, elapsed_seconds)
         """
         t0 = time.time()
-        system_prompt = (
-            "You are Baton System 2: Deep Synthesizer & Principal Engineer.\n"
-            "You write complete, production-grade, mathematically rigorous implementations and specifications.\n"
-            "Include zero placeholders, ellipses (...), or pseudo-code.\n"
-            "Every function, formula, and class must be fully written and tested."
-        )
-
-        prompt_parts = [
-            f"# Objective: {task.title}",
-            f"Instructions:\n{task.prompt_template or ''}",
-        ]
-
-        if upstream_dossiers:
-            prompt_parts.append("\n## Briefing Dossiers from System 1 Reconnaissance:")
-            for d in upstream_dossiers:
-                payload = d.get("result_payload", "").strip()
-                # Rough token budget safeguard (~4 chars per token)
-                max_chars = int((self.max_prompt_tokens / max(len(upstream_dossiers), 1)) * 3.5)
-                budgeted_payload = payload[:max_chars]
-                prompt_parts.append(f"### Upstream Finding: {d['title']}\n{budgeted_payload}\n")
-
-        prompt_parts.append("\nGenerate the complete, robust implementation now:")
-        full_user_prompt = "\n".join(prompt_parts)
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": full_user_prompt},
-        ]
+        messages = self.build_canonical_prompt(task, upstream_dossiers)
 
         logger.info("System 2 executing deep synthesis for task '%s'...", task.task_id)
 

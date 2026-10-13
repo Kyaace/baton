@@ -872,11 +872,11 @@ class Database:
         with self.get_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT t.task_id, t.title, t.task_type, t.tool_name, t.result_payload, t.artifact_path
+                SELECT t.task_id, t.title, t.task_type, t.tool_name, t.result_payload, t.artifact_path, t.completed_at
                 FROM task_dependencies td
                 JOIN tasks t ON td.depends_on_task_id = t.task_id
                 WHERE td.task_id = ? AND t.status = 'completed'
-                ORDER BY t.completed_at ASC
+                ORDER BY t.completed_at ASC, t.task_id ASC
                 """,
                 (task_id,),
             ).fetchall()

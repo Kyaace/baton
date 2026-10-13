@@ -361,4 +361,95 @@ def test_system2_synthesize_max_continuations_budget_clamp(tmp_path: Path):
     assert Path(art_path).exists()
 
 
+def test_system2_deterministic_upstream_dossier_sorting():
+    from baton.system2 import System2Runner
+
+    dossiers_unsorted = [
+        {"task_id": "task_z", "completed_at": "2026-10-13 12:05:00", "title": "Zeta Finding", "result_payload": "Payload Z"},
+        {"task_id": "task_a", "completed_at": "2026-10-13 12:01:00", "title": "Alpha Finding", "result_payload": "Payload A"},
+        {"task_id": "task_m", "completed_at": "2026-10-13 12:01:00", "title": "Mu Finding", "result_payload": "Payload M"},
+    ]
+
+    sorted_d = System2Runner.sort_upstream_dossiers(dossiers_unsorted)
+    ids = [d["task_id"] for d in sorted_d]
+    assert ids == ["task_a", "task_m", "task_z"]
+
+    # Reversing input list yields identical deterministic order
+    sorted_rev = System2Runner.sort_upstream_dossiers(list(reversed(dossiers_unsorted)))
+    assert [d["task_id"] for d in sorted_rev] == ids
+
+
+def test_system2_canonical_prompt_prefix_structure(tmp_path: Path):
+    from baton.models import Task, TaskType
+    from baton.system2 import System2Runner, STATIC_SYNTHESIS_SYSTEM_PROMPT
+
+    runner = System2Runner(artifacts_dir=tmp_path)
+    task = Task(
+        task_id="synth_orbit",
+        job_id="job_space",
+        title="Synthesize Keplerian Orbit Propagation",
+        tier=Tier.SYSTEM_2,
+        task_type=TaskType.DEEP_SYNTHESIS,
+        prompt_template="def propagate_orbit(t): pass",
+    )
+    dossiers = [
+        {"task_id": "recon_consts", "completed_at": "2026-10-13 10:00:00", "title": "Gravitational Parameter", "result_payload": "mu = 3.986e14"},
+        {"task_id": "recon_elements", "completed_at": "2026-10-13 10:05:00", "title": "Orbital Elements", "result_payload": "a = 7000 km, e = 0.01"},
+    ]
+
+    msgs = runner.build_canonical_prompt(task, dossiers)
+    assert len(msgs) == 2
+    # 1. System prompt is static, invariant, with zero dynamic timestamps
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"] == STATIC_SYNTHESIS_SYSTEM_PROMPT
+    assert "2026" not in msgs[0]["content"]
+
+    # 2. User prompt layout: Dossiers appear BEFORE Task Objective & Instructions
+    user_content = msgs[1]["content"]
+    dossier_pos = user_content.find("## Briefing Dossiers from System 1 Reconnaissance:")
+    obj_pos = user_content.find("# Objective: Synthesize Keplerian Orbit Propagation")
+    action_pos = user_content.find("Generate the complete, robust implementation now:")
+
+    assert dossier_pos != -1
+    assert obj_pos != -1
+    assert action_pos != -1
+    assert dossier_pos < obj_pos < action_pos
+
+
+def test_system2_prompt_cache_flag_and_header(tmp_path: Path):
+    from baton.system2 import System2Runner
+
+    runner = System2Runner(artifacts_dir=tmp_path, cache_prompt=True)
+    runner._discovered_model = "deepseek-v4-colibri"
+
+    mock_resp = MagicMock()
+    mock_resp.iter_lines.return_value = [
+        b'data: {"choices":[{"delta":{"content":"code"},"finish_reason":"stop"}]}\n\n',
+        b'data: [DONE]\n\n',
+    ]
+    mock_resp.raise_for_status.return_value = None
+
+    with patch("requests.post", return_value=mock_resp) as mock_post:
+        runner.chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            stream=True,
+        )
+        kwargs = mock_post.call_args[1]
+        assert kwargs["json"]["cache_prompt"] is True
+        assert kwargs["headers"]["X-Baton-Cache-Prefix"] == "pinned"
+
+    # When cache_prompt=False, flag is omitted and header indicates bypass
+    runner_nocache = System2Runner(artifacts_dir=tmp_path, cache_prompt=False)
+    runner_nocache._discovered_model = "deepseek-v4-colibri"
+    with patch("requests.post", return_value=mock_resp) as mock_post_nocache:
+        runner_nocache.chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            stream=True,
+        )
+        kwargs_nocache = mock_post_nocache.call_args[1]
+        assert "cache_prompt" not in kwargs_nocache["json"]
+        assert kwargs_nocache["headers"]["X-Baton-Cache-Prefix"] == "bypass"
+
+
+
 

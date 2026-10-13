@@ -101,6 +101,79 @@ class DAGPlan(BaseModel):
     tasks: list[TaskPlan]
 
 
+class BriefingDossier(BaseModel):
+    """Structured, token-dense briefing dossier produced by System 1 reconnaissance."""
+    summary: str = Field(description="One-sentence executive summary")
+    core_facts: list[str] = Field(default_factory=list, description="Core verified facts, constants, and parameters")
+    equations_or_apis: list[str] = Field(default_factory=list, description="Exact equations, formulas, type signatures, or API interfaces")
+    open_questions: list[str] = Field(default_factory=list, description="Unresolved ambiguities or edge cases")
+    source_citations: list[str] = Field(default_factory=list, description="Sources, files, or citations referenced")
+
+    def to_compact_markdown(self) -> str:
+        """Renders the dossier into an ultra-compact, token-dense format stripping conversational fluff."""
+        parts = [f"## Summary: {self.summary.strip()}"]
+        if self.core_facts:
+            facts = "\n".join(f"- {f.strip()}" for f in self.core_facts if f.strip())
+            parts.append(f"### Core Facts\n{facts}")
+        if self.equations_or_apis:
+            eqs = "\n".join(
+                f"- `{eq.strip()}`" if not eq.strip().startswith("`") and not eq.strip().startswith("```") else f"- {eq.strip()}"
+                for eq in self.equations_or_apis if eq.strip()
+            )
+            parts.append(f"### Equations & APIs\n{eqs}")
+        if self.open_questions:
+            questions = "\n".join(f"- {q.strip()}" for q in self.open_questions if q.strip())
+            parts.append(f"### Open Questions\n{questions}")
+        if self.source_citations:
+            citations = "\n".join(f"- {c.strip()}" for c in self.source_citations if c.strip())
+            parts.append(f"### Citations\n{citations}")
+        return "\n\n".join(parts)
+
+
+class VerificationDossier(BaseModel):
+    """Structured verification dossier produced by System 1 code verifier."""
+    verdict: str = Field(description="VERIFIED or FAILED")
+    syntax_valid: bool = Field(default=True, description="Whether AST syntax validation passed")
+    tests_passed: int = Field(default=0, description="Count of passed tests")
+    tests_failed: int = Field(default=0, description="Count of failed tests")
+    test_errors: int = Field(default=0, description="Count of test errors or crashes")
+    key_findings: list[str] = Field(default_factory=list, description="Key verification findings or failure traces")
+    remediation_points: list[str] = Field(default_factory=list, description="Actionable remediation steps if failed")
+
+    def to_compact_markdown(self) -> str:
+        status_line = (
+            f"## Verdict: {self.verdict.strip().upper()} "
+            f"(Syntax: {'PASS' if self.syntax_valid else 'FAIL'} | "
+            f"Tests: {self.tests_passed} passed, {self.tests_failed} failed, {self.test_errors} errors)"
+        )
+        parts = [status_line]
+        if self.key_findings:
+            parts.append("### Findings\n" + "\n".join(f"- {f.strip()}" for f in self.key_findings if f.strip()))
+        if self.remediation_points:
+            parts.append("### Remediation\n" + "\n".join(f"- {r.strip()}" for r in self.remediation_points if r.strip()))
+        return "\n\n".join(parts)
+
+
+class RFDossier(BaseModel):
+    """Structured RF signal intelligence dossier."""
+    band_name: str = Field(description="Frequency band name or frequency range")
+    noise_floor_db: Optional[float] = Field(default=None, description="Average noise floor in dBm")
+    carriers_detected: list[str] = Field(default_factory=list, description="Detected carriers with frequency, power, and SNR")
+    demodulated_transmissions: list[str] = Field(default_factory=list, description="Demodulated packets or signals")
+    recommendations: list[str] = Field(default_factory=list, description="Channel parameters or processing recommendations")
+
+    def to_compact_markdown(self) -> str:
+        nf_str = f" (Noise Floor: {self.noise_floor_db:.1f} dBm)" if self.noise_floor_db is not None else ""
+        parts = [f"## RF Survey: {self.band_name.strip()}{nf_str}"]
+        if self.carriers_detected:
+            parts.append("### Detected Carriers\n" + "\n".join(f"- {c.strip()}" for c in self.carriers_detected if c.strip()))
+        if self.demodulated_transmissions:
+            parts.append("### Demodulated Transmissions\n" + "\n".join(f"- {t.strip()}" for t in self.demodulated_transmissions if t.strip()))
+        if self.recommendations:
+            parts.append("### Recommendations\n" + "\n".join(f"- {r.strip()}" for r in self.recommendations if r.strip()))
+        return "\n\n".join(parts)
+
+
 class Task(BaseModel):
     """Represents a discrete task tracked in SQLite orchestrator.db."""
     task_id: str

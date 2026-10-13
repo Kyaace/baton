@@ -17,15 +17,77 @@ import requests
 
 from baton.models import (
     ArtifactType,
+    BriefingDossier,
+    RFDossier,
     Task,
     TaskCancelledError,
     TaskProgress,
     Tier,
+    VerificationDossier,
     VerificationFailedError,
 )
 from baton.tools.zim import ZimTool
 
 logger = logging.getLogger("baton.system1")
+
+
+def strip_conversational_fluff(text: str) -> str:
+    """Strips informal conversational preambles and pleasantries from LLM output."""
+    cleaned = text.strip()
+    # Remove leading conversational preamble lines
+    cleaned = re.sub(
+        r"^(?:Sure(?: thing)?[!,.]?|Here is[^\n]*|Certainly[!,.]?|Below is[^\n]*|I have[^\n]*|Please find[^\n]*|As requested[^\n]*)[^\n]*\n+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    # Remove trailing pleasantries
+    cleaned = re.sub(
+        r"\n+(?:I hope this helps[^\n]*|Let me know if[^\n]*|Feel free to[^\n]*|Hope this helps[^\n]*|Cheers[!,.]?|Best regards[^\n]*)$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+def parse_structured_dossier(
+    raw_text: str, is_verify: bool = False, is_sdr: bool = False
+) -> tuple[str, Optional[Any]]:
+    """
+    Parses structured JSON emitted by System 1 Qwen into a validated Pydantic model
+    and renders it into ultra-compact, token-dense Markdown.
+    Falls back gracefully to cleaned text if JSON parsing fails.
+    """
+    cleaned = raw_text.strip()
+    # Strip markdown code fence if wrapped in ```json ... ```
+    match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+    if match:
+        json_candidate = match.group(1).strip()
+    else:
+        obj_match = re.search(r"(\{.*\})", cleaned, re.DOTALL)
+        json_candidate = obj_match.group(1).strip() if obj_match else cleaned
+
+    try:
+        data = json.loads(json_candidate)
+        if isinstance(data, dict):
+            if is_verify:
+                if "verdict" in data or "tests_passed" in data or "key_findings" in data:
+                    model = VerificationDossier.model_validate(data)
+                    return model.to_compact_markdown(), model
+            elif is_sdr:
+                if "band_name" in data or "carriers_detected" in data:
+                    model = RFDossier.model_validate(data)
+                    return model.to_compact_markdown(), model
+            else:
+                if "summary" in data or "core_facts" in data or "equations_or_apis" in data:
+                    model = BriefingDossier.model_validate(data)
+                    return model.to_compact_markdown(), model
+    except Exception as e:
+        logger.debug("Structured dossier JSON parsing skipped/failed: %s", e)
+
+    # Fallback: clean fluff and return
+    return strip_conversational_fluff(raw_text), None
 
 
 def extract_code_block(text: str) -> str:
@@ -75,6 +137,7 @@ class System1Runner:
         sandbox_tool: Optional[Any] = None,
         sdr_tool: Optional[Any] = None,
         max_repair_retries: int = 2,
+        structured_output: bool = True,
     ):
         self.ollama_url = (
             ollama_url
@@ -93,6 +156,7 @@ class System1Runner:
         self._sandbox_tool = sandbox_tool
         self._sdr_tool = sdr_tool
         self.max_repair_retries = max_repair_retries
+        self.structured_output = structured_output
         self._cancel_requested = False
         self._active_response: Optional[requests.Response] = None
 
@@ -140,6 +204,7 @@ class System1Runner:
         stream: bool = True,
         progress: Optional[TaskProgress] = None,
         progress_callback: Optional[Callable[[TaskProgress], None]] = None,
+        format: Optional[str | dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Calls Ollama generate API with optional streaming."""
         payload: dict[str, Any] = {
@@ -151,6 +216,8 @@ class System1Runner:
                 "num_ctx": 4096,
             },
         }
+        if format is not None:
+            payload["format"] = format
         if system_prompt:
             payload["system"] = system_prompt
 
@@ -408,32 +475,46 @@ class System1Runner:
         if is_verify:
             system_prompt = (
                 "You are Baton System 1: an autonomous, rigorous Code Verifier.\n"
-                "Your objective is to analyze verification, syntax, and test execution results and compile a concise\n"
-                "Markdown verification dossier (maximum 300 words).\n"
-                "Rules:\n"
-                "1. Report exact test metrics (passed, failed, syntax status, execution errors).\n"
-                "2. Identify any broken assumptions, missing imports, or runtime exceptions.\n"
-                "3. Conclude with a clear verdict: VERIFIED or FAILED, with actionable remediation points."
+                "Analyze the verification and test data and emit a structured JSON dossier with zero conversational fluff.\n"
+                "Output JSON matching this exact schema:\n"
+                "{\n"
+                '  "verdict": "VERIFIED" or "FAILED",\n'
+                '  "syntax_valid": true,\n'
+                '  "tests_passed": 0,\n'
+                '  "tests_failed": 0,\n'
+                '  "test_errors": 0,\n'
+                '  "key_findings": ["exact finding or error trace line"],\n'
+                '  "remediation_points": ["actionable remediation step"]\n'
+                "}\n"
+                "Output ONLY valid JSON. Zero pleasantries."
             )
         elif is_sdr:
             system_prompt = (
                 "You are Baton System 1: an autonomous RF Telemetry & Signal Intelligence Scout.\n"
-                "Your objective is to analyze radio frequency sweeps, carrier peaks, demodulations, and telemetry packets,\n"
-                "and compile a concise, structured RF Briefing Dossier (maximum 300 words) for System 2 overnight synthesis.\n"
-                "Rules:\n"
-                "1. Summarize detected carriers, frequencies (MHz), peak power (dBm), and Signal-to-Noise Ratio (SNR).\n"
-                "2. State band allocations, identified transmissions (e.g. APRS, FM, Aviation, ISM sensors), and active transmitters.\n"
-                "3. Conclude with clear mathematical recommendations or channel parameters for downstream processing."
+                "Analyze radio frequency sweeps, carrier peaks, and packets, and emit a structured JSON dossier.\n"
+                "Output JSON matching this exact schema:\n"
+                "{\n"
+                '  "band_name": "band name or range",\n'
+                '  "noise_floor_db": -48.2,\n'
+                '  "carriers_detected": ["carrier frequency, power, and SNR"],\n'
+                '  "demodulated_transmissions": ["demodulated packet details"],\n'
+                '  "recommendations": ["channel parameter or downstream processing recommendations"]\n'
+                "}\n"
+                "Output ONLY valid JSON. Zero pleasantries."
             )
         else:
             system_prompt = (
                 "You are Baton System 1: an autonomous, high-throughput Recon Scout.\n"
-                "Your objective is to extract, filter, and distill facts into a dense, mathematically precise\n"
-                "Markdown briefing dossier (maximum 300 words) for System 2 (Deep Synthesizer).\n"
-                "Rules:\n"
-                "1. Preserve exact equations, physical constants, parameters, dates, and variable names.\n"
-                "2. Eliminate conversational filler, redundant prose, and navigational boilerplate.\n"
-                "3. Format with clean Markdown headers and bullet points."
+                "Extract, filter, and distill facts into a structured JSON briefing dossier for System 2.\n"
+                "Output JSON matching this exact schema:\n"
+                "{\n"
+                '  "summary": "dense one-sentence executive summary",\n'
+                '  "core_facts": ["verified constant, parameter, or factual statement"],\n'
+                '  "equations_or_apis": ["exact equation, formula, or API signature"],\n'
+                '  "open_questions": ["unresolved ambiguity or edge case"],\n'
+                '  "source_citations": ["source title, file, or reference"]\n'
+                "}\n"
+                "Output ONLY valid JSON. Zero pleasantries."
             )
 
         user_prompt_parts = [
@@ -472,8 +553,12 @@ class System1Runner:
             stream=True,
             progress=progress,
             progress_callback=progress_callback,
+            format="json" if self.structured_output else None,
         )
-        dossier_content = gen_result["response"]
+        raw_response = gen_result["response"]
+        dossier_content, parsed_model = parse_structured_dossier(
+            raw_response, is_verify=is_verify, is_sdr=is_sdr
+        )
         tokens = gen_result["tokens_generated"]
         elapsed = time.time() - t0
 

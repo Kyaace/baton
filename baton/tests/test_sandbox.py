@@ -336,3 +336,123 @@ def test_system1_verification_exhausted_raises_error(tmp_path: Path):
     assert exc_info.value.artifact_path is not None
     assert "impossible.py" in exc_info.value.target_code or "impossible" in exc_info.value.target_code
 
+
+def test_briefing_dossier_compact_rendering():
+    from baton.models import BriefingDossier
+
+    dossier = BriefingDossier(
+        summary="Keplerian orbit propagation requires solving Kepler's equation iteratively.",
+        core_facts=["Gravitational parameter of Earth is 398600.4418 km^3/s^2", "Mean motion n = sqrt(mu / a^3)"],
+        equations_or_apis=["M = E - e * sin(E)", "def solve_kepler(M: float, e: float) -> float"],
+        open_questions=["Near-parabolic eccentricity stability"],
+        source_citations=["Fundamentals of Astrodynamics (Bate, Mueller, White)"],
+    )
+
+    md = dossier.to_compact_markdown()
+    assert "## Summary: Keplerian orbit propagation" in md
+    assert "### Core Facts" in md
+    assert "- Gravitational parameter" in md
+    assert "### Equations & APIs" in md
+    assert "`M = E - e * sin(E)`" in md
+    assert "`def solve_kepler(M: float, e: float) -> float`" in md
+    assert "### Open Questions" in md
+    assert "### Citations" in md
+
+
+def test_strip_conversational_fluff():
+    from baton.system1 import strip_conversational_fluff
+
+    raw_with_fluff = (
+        "Sure, here is the briefing dossier you requested!\n\n"
+        "## Summary: Kepler's equation is transcendental.\n"
+        "- Fact 1\n\n"
+        "I hope this helps! Let me know if you need any other calculations."
+    )
+    cleaned = strip_conversational_fluff(raw_with_fluff)
+    assert not cleaned.startswith("Sure")
+    assert not cleaned.endswith("calculations.")
+    assert cleaned.startswith("## Summary: Kepler's equation is transcendental.")
+
+
+def test_parse_structured_dossier_json_and_fallback():
+    from baton.system1 import parse_structured_dossier
+    from baton.models import BriefingDossier, VerificationDossier
+
+    # 1. Valid JSON in markdown code fence
+    json_block = """```json
+    {
+        "summary": "Orbital resonance verified.",
+        "core_facts": ["Period ratio is 2:1"],
+        "equations_or_apis": ["T1 / T2 = 2.0"],
+        "open_questions": [],
+        "source_citations": ["JPL Ephemeris"]
+    }
+    ```"""
+    md, model = parse_structured_dossier(json_block, is_verify=False, is_sdr=False)
+    assert isinstance(model, BriefingDossier)
+    assert "## Summary: Orbital resonance verified." in md
+    assert "`T1 / T2 = 2.0`" in md
+
+    # 2. Valid Verification JSON
+    verify_json = """{
+        "verdict": "VERIFIED",
+        "syntax_valid": true,
+        "tests_passed": 5,
+        "tests_failed": 0,
+        "test_errors": 0,
+        "key_findings": ["All unit assertions hold."],
+        "remediation_points": []
+    }"""
+    md_v, model_v = parse_structured_dossier(verify_json, is_verify=True, is_sdr=False)
+    assert isinstance(model_v, VerificationDossier)
+    assert "## Verdict: VERIFIED" in md_v
+    assert "Tests: 5 passed" in md_v
+
+    # 3. Fallback on non-JSON raw markdown
+    raw_md = "## Freeform Dossier\n- Finding A\n- Finding B"
+    md_f, model_f = parse_structured_dossier(raw_md)
+    assert model_f is None
+    assert "## Freeform Dossier" in md_f
+
+
+def test_system1_executes_task_with_structured_json(tmp_path: Path):
+    import json
+    from unittest.mock import patch
+    from baton.models import Task, TaskType, Tier
+    from baton.system1 import System1Runner
+
+    runner = System1Runner(artifacts_dir=tmp_path, structured_output=True)
+    task = Task(
+        task_id="recon_structured",
+        job_id="job_struct",
+        title="Extract Ephemeris Formulas",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_RECON,
+        prompt_template="Formulas for solar coordinates",
+    )
+
+    simulated_json = json.dumps({
+        "summary": "Solar elevation is calculated using solar declination and hour angle.",
+        "core_facts": ["Solar constant = 1361 W/m^2", "Obliquity of ecliptic = 23.44 deg"],
+        "equations_or_apis": ["sin(alt) = sin(lat)*sin(dec) + cos(lat)*cos(dec)*cos(ha)"],
+        "open_questions": [],
+        "source_citations": ["NOAA Solar Position Calculator"],
+    })
+
+    with patch.object(runner, "generate") as mock_gen:
+        mock_gen.return_value = {
+            "response": simulated_json,
+            "tokens_generated": 65,
+            "elapsed_seconds": 1.1,
+        }
+
+        summary, art_path, tokens, elapsed = runner.execute_task(task)
+
+        # Check format was requested as "json"
+        assert mock_gen.call_args[1]["format"] == "json"
+        assert "## Summary: Solar elevation" in summary
+        content = Path(art_path).read_text(encoding="utf-8")
+        assert "### Equations & APIs" in content
+        assert "sin(alt)" in content
+
+
