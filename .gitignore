@@ -14,9 +14,10 @@ dist/
 *.egg-info/
 
 # Baton local runtime data, databases, and logs
+*.db
+*.db-journal
+*.db.lock
 baton/data/rss/cache.db*
-baton/data/*.db
-baton/data/*.db-journal
 baton/artifacts/
 baton/logs/*.log
 
