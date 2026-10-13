@@ -1,0 +1,14 @@
+# Newsboat URLs Configuration
+# Format: <url> [tag1] [tag2] ... ["~Feed Title"]
+
+https://feeds.arstechnica.com/arstechnica/index "tech" "computing" "~Ars Technica"
+https://phys.org/rss-feed/ "science" "physics" "~Phys.org"
+https://www.nature.com/nature.rss "science" "biology" "~Nature"
+https://www.nasa.gov/news-release/feed/ "science" "space" "~NASA"
+https://krebsonsecurity.com/feed/ "tech" "security" "~Krebs on Security"
+https://www.schneier.com/feed/ "tech" "security" "~Schneier on Security"
+https://simonwillison.net/atom/entries/ "tech" "AI" "~Simon Willison's Weblog"
+https://restofworld.org/feed/ "tech" "culture" "~Rest of World"
+https://www.bleepingcomputer.com/feed/ "tech" "security" "~BleepingComputer"
+https://www.technologyreview.com/feed/ "tech" "AI" "~MIT Technology Review"
+https://www.theverge.com/rss/index.xml "tech" "consumer-electronics" "~The Verge"

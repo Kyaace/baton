@@ -1,0 +1,13 @@
+# Newsboat Configuration for Baton System 1 Offline RSS Ingestion
+
+# Storage paths pointing to drive E: (WSL mount)
+cache-file "/mnt/e/dev/Antigravity/local_llm/baton/data/rss/cache.db"
+
+# Data retention
+max-items  300
+
+# Network and parsing settings
+user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Newsboat/2.45"
+download-timeout 15
+reload-threads 4
+auto-reload no

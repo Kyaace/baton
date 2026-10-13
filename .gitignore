@@ -1,0 +1,31 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Environments
+.venv/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Baton local runtime data, databases, and logs
+baton/data/rss/cache.db*
+baton/data/*.db
+baton/data/*.db-journal
+baton/artifacts/
+baton/logs/*.log
+
+# RF captures & raw SDR data
+*.wav
+*.raw
+*.iq
+*.csv
+
+# OS specific
+.DS_Store
+Thumbs.db
