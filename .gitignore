@@ -16,6 +16,8 @@ dist/
 # Baton local runtime data, databases, and logs
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.db.lock
 baton/data/rss/cache.db*
 baton/artifacts/

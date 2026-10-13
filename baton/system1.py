@@ -8,16 +8,58 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import requests
 
-from baton.models import ArtifactType, Task, TaskCancelledError, TaskProgress, Tier
+from baton.models import (
+    ArtifactType,
+    Task,
+    TaskCancelledError,
+    TaskProgress,
+    Tier,
+    VerificationFailedError,
+)
 from baton.tools.zim import ZimTool
 
 logger = logging.getLogger("baton.system1")
+
+
+def extract_code_block(text: str) -> str:
+    """Extracts code enclosed in triple backtick markdown fences (```python ... ``` or ``` ... ```)."""
+    match = re.search(r"```(?:python)?\s*\n(.*?)\n```", text, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    match2 = re.search(r"```(?:python)?\s*\n(.*)", text, re.DOTALL | re.IGNORECASE)
+    if match2:
+        return match2.group(1).rstrip("`").strip()
+    return text.strip()
+
+
+def compress_traceback(raw_trace: str, max_chars: int = 1500) -> str:
+    """Extracts high-signal traceback lines and failures from raw execution output."""
+    if not raw_trace or len(raw_trace) <= max_chars:
+        return raw_trace or ""
+    lines = raw_trace.strip().splitlines()
+    high_signal = []
+    capture = False
+    for line in lines:
+        l_lower = line.lower()
+        if any(k in l_lower for k in ("traceback", "syntaxerror", "assertionerror", "nameerror", "importerror", "typeerror", "valueerror", "failed", "error:")):
+            high_signal.append(line)
+            capture = True
+        elif capture and (line.startswith(" ") or line.startswith(">")):
+            high_signal.append(line)
+        elif "====" in line:
+            high_signal.append(line)
+            capture = False
+    compressed = "\n".join(high_signal)
+    if len(compressed) > max_chars:
+        compressed = compressed[:max_chars] + "\n... [truncated]"
+    return compressed or raw_trace[-max_chars:]
 
 
 class System1Runner:
@@ -32,6 +74,7 @@ class System1Runner:
         newsboat_tool: Optional[Any] = None,
         sandbox_tool: Optional[Any] = None,
         sdr_tool: Optional[Any] = None,
+        max_repair_retries: int = 2,
     ):
         self.ollama_url = (
             ollama_url
@@ -49,6 +92,7 @@ class System1Runner:
         self._newsboat_tool = newsboat_tool
         self._sandbox_tool = sandbox_tool
         self._sdr_tool = sdr_tool
+        self.max_repair_retries = max_repair_retries
         self._cancel_requested = False
         self._active_response: Optional[requests.Response] = None
 
@@ -205,6 +249,8 @@ class System1Runner:
         """
         t0 = time.time()
         raw_tool_data = ""
+        has_verification_error = False
+        target_code_str = ""
 
         is_verify = (
             (task.task_type and task.task_type.value == "fast_verify")
@@ -266,12 +312,95 @@ class System1Runner:
                     art_file = Path(art_p)
                     if art_file.suffix == ".py":
                         code_str = art_file.read_text(encoding="utf-8", errors="replace")
+                        target_code_str = code_str
                         self.sandbox_tool.write_file(art_file.name, code_str)
+                        syn_info = self.sandbox_tool.syntax_check(code_str)
                         syn_res = self.sandbox_tool.execute("python_syntax_check", {"code": code_str})
                         verification_findings.append(f"### Syntax Verification (`{art_file.name}`):\n{syn_res}")
-                        if "def test_" in code_str or "assert " in code_str:
-                            py_res = self.sandbox_tool.execute("pytest_run", {"target": art_file.name})
-                            verification_findings.append(f"### Test Suite Execution (`{art_file.name}`):\n{py_res}")
+                        item_error = not syn_info.get("valid", True)
+                        last_err = syn_info.get("message", "") if item_error else ""
+
+                        if not item_error:
+                            if "def test_" in code_str or "assert " in code_str:
+                                py_res_dict = self.sandbox_tool.run_pytest(target=art_file.name)
+                                py_res_md = self.sandbox_tool.execute("pytest_run", {"target": art_file.name})
+                                verification_findings.append(f"### Test Suite Execution (`{art_file.name}`):\n{py_res_md}")
+                                metrics = py_res_dict.get("metrics", {})
+                                if not py_res_dict.get("success", False) or metrics.get("failed", 0) > 0 or metrics.get("errors", 0) > 0:
+                                    item_error = True
+                                    last_err = py_res_dict.get("output", "") or py_res_dict.get("error", "Pytest suite failed")
+                            else:
+                                eval_res = self.sandbox_tool.eval_code(code_str, filename=art_file.name)
+                                if not eval_res.get("success"):
+                                    item_error = True
+                                    last_err = eval_res.get("error", "Execution failed")
+                                    verification_findings.append(f"### Execution (`{art_file.name}`): FAILED\n{last_err}")
+
+                        # System 1 Local Repair Loop if error detected
+                        if item_error:
+                            logger.info("System 1 entering local repair loop for '%s'...", art_file.name)
+                            for retry in range(1, self.max_repair_retries + 1):
+                                comp_trace = compress_traceback(last_err)
+                                repair_prompt = (
+                                    f"The Python file `{art_file.name}` failed automated verification.\n\n"
+                                    f"### Error Diagnostics & Traceback:\n```text\n{comp_trace}\n```\n\n"
+                                    f"### Failing Code:\n```python\n{code_str}\n```\n\n"
+                                    "Fix the syntax error, missing import, or assertion failure.\n"
+                                    "Return ONLY the complete, corrected Python code inside a ```python ``` block."
+                                )
+                                repair_sys_prompt = (
+                                    "You are Baton System 1: Fast Code Repair Specialist.\n"
+                                    "Fix the error and emit clean, working Python. Zero conversational filler."
+                                )
+                                patch_res = self.generate(repair_prompt, system_prompt=repair_sys_prompt)
+                                patch_code = extract_code_block(patch_res.get("response", ""))
+                                if not patch_code or patch_code == code_str:
+                                    continue
+
+                                # Stage patched code in sandbox
+                                self.sandbox_tool.write_file(art_file.name, patch_code)
+                                syn_check = self.sandbox_tool.syntax_check(patch_code)
+                                if not syn_check.get("valid", True):
+                                    last_err = syn_check.get("message", "Syntax error")
+                                    code_str = patch_code
+                                    target_code_str = patch_code
+                                    verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Syntax)\n{last_err}")
+                                    continue
+
+                                # If syntax passed, test again
+                                if "def test_" in patch_code or "assert " in patch_code:
+                                    py_re_dict = self.sandbox_tool.run_pytest(target=art_file.name)
+                                    metrics_re = py_re_dict.get("metrics", {})
+                                    if not py_re_dict.get("success", False) or metrics_re.get("failed", 0) > 0 or metrics_re.get("errors", 0) > 0:
+                                        last_err = py_re_dict.get("output", "") or "Tests failed"
+                                        code_str = patch_code
+                                        target_code_str = patch_code
+                                        verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Tests)\n{last_err[:300]}")
+                                        continue
+                                else:
+                                    eval_re = self.sandbox_tool.eval_code(patch_code, filename=art_file.name)
+                                    if not eval_re.get("success"):
+                                        last_err = eval_re.get("error", "Execution failed")
+                                        code_str = patch_code
+                                        target_code_str = patch_code
+                                        verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Runtime)\n{last_err}")
+                                        continue
+
+                                # Patch SUCCEEDED!
+                                code_str = patch_code
+                                target_code_str = patch_code
+                                item_error = False
+                                art_file.write_text(patch_code, encoding="utf-8")
+                                verification_findings.append(
+                                    f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): SUCCESS\n"
+                                    f"System 1 successfully resolved all errors in `{art_file.name}` and updated artifact on disk."
+                                )
+                                logger.info("System 1 successfully patched '%s' on attempt %d.", art_file.name, retry)
+                                break
+
+                        if item_error:
+                            has_verification_error = True
+
             if verification_findings:
                 raw_tool_data = "\n\n".join(verification_findings)
 
@@ -357,4 +486,14 @@ class System1Runner:
         artifact_path.write_text(header + dossier_content, encoding="utf-8")
 
         summary_snippet = dossier_content.split("\n\n")[0] if "\n\n" in dossier_content else dossier_content[:200]
+
+        if is_verify and has_verification_error:
+            logger.warning("Verification failed and local repairs exhausted for '%s'.", task.task_id)
+            raise VerificationFailedError(
+                message=summary_snippet,
+                artifact_path=str(artifact_path),
+                failure_trace=raw_tool_data,
+                target_code=target_code_str,
+            )
+
         return summary_snippet, str(artifact_path), tokens, elapsed

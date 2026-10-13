@@ -24,7 +24,9 @@ from baton.models import (
     TaskPlan,
     TaskProgress,
     TaskStatus,
+    TaskType,
     Tier,
+    VerificationFailedError,
 )
 from baton.system1 import System1Runner
 from baton.system2 import System2Runner
@@ -42,6 +44,10 @@ class Orchestrator:
         system1: Optional[System1Runner] = None,
         system2: Optional[System2Runner] = None,
         progress_dir: Optional[Path] = None,
+        auto_verify: bool = True,
+        auto_repair: bool = True,
+        tier_sticky: bool = True,
+        starvation_threshold: Optional[int] = 10,
     ):
         self.db = db or Database()
         self.engine_mgr = engine_manager or EngineManager()
@@ -49,6 +55,11 @@ class Orchestrator:
         self.system2 = system2 or System2Runner(colibri_url=getattr(self.engine_mgr, "colibri_url", None))
         self.progress_dir = progress_dir or Path("baton/artifacts/progress")
         self.progress_dir.mkdir(parents=True, exist_ok=True)
+        self.auto_verify = auto_verify
+        self.auto_repair = auto_repair
+        self.tier_sticky = tier_sticky
+        self.starvation_threshold = starvation_threshold
+        self.consecutive_tier_count: int = 0
         self.active_progress: dict[str, TaskProgress] = {}
         self.active_task_id: Optional[str] = None
         self.on_task_update: Optional[Callable[[Task], None]] = None
@@ -199,7 +210,62 @@ class Orchestrator:
                 stopped_id = t.task_id
 
         self.active_task_id = None
+        self.consecutive_tier_count = 0
         return stopped_id
+
+    def select_next_task(self, runnable: list[Task]) -> Optional[Task]:
+        """
+        Selects the next task from runnable candidates using Tier-Sticky Scheduling.
+
+        To minimize costly VRAM context-switch thrashing (unloading/reloading large models):
+        - If tier_sticky is disabled, returns highest priority runnable task (scalar priority).
+        - If the system is cold (engine_mgr.active_tier is None), prioritizes System 1 tasks
+          (recon and verification) to unblock downstream nodes before spinning up Colibrì.
+        - When an engine is warm, drains ready tasks for that tier up to `starvation_threshold`.
+        - If the warm tier exceeds starvation_threshold and tasks for the other tier are waiting,
+          yields to the other tier to prevent starvation.
+        """
+        if not runnable:
+            return None
+
+        if not self.tier_sticky:
+            return runnable[0]
+
+        active_tier = getattr(self.engine_mgr, "active_tier", None)
+
+        # 1. Cold start: prefer System 1 to drain recon/verification tasks first
+        if active_tier is None:
+            sys1_candidates = [t for t in runnable if t.tier == Tier.SYSTEM_1]
+            if sys1_candidates:
+                return sys1_candidates[0]
+            return runnable[0]
+
+        # 2. Warm engine active: partition runnable tasks
+        warm_candidates = [t for t in runnable if t.tier == active_tier]
+        other_candidates = [t for t in runnable if t.tier != active_tier]
+
+        # If no tasks remain for the warm tier, we must switch to other tier
+        if not warm_candidates:
+            return other_candidates[0]
+
+        # If no tasks exist for the other tier, keep executing warm tier
+        if not other_candidates:
+            return warm_candidates[0]
+
+        # Both warm and other candidates exist: check starvation threshold
+        if (
+            self.starvation_threshold is not None
+            and self.consecutive_tier_count >= self.starvation_threshold
+        ):
+            logger.info(
+                "Active tier '%s' reached starvation threshold (%d consecutive tasks). Yielding to '%s'.",
+                active_tier.value if isinstance(active_tier, Tier) else active_tier,
+                self.consecutive_tier_count,
+                other_candidates[0].tier.value if isinstance(other_candidates[0].tier, Tier) else other_candidates[0].tier,
+            )
+            return other_candidates[0]
+
+        return warm_candidates[0]
 
     def step(self, task_id: Optional[str] = None) -> Optional[Task]:
         """
@@ -215,24 +281,31 @@ class Orchestrator:
             runnable = self.db.get_runnable_tasks()
             if not runnable:
                 return None
-            target_task = runnable[0]
+            target_task = self.select_next_task(runnable)
+            if not target_task:
+                return None
 
-        logger.info("Executing task: '%s' (%s, priority %d)", target_task.task_id, target_task.tier.value, target_task.priority)
+        logger.info(
+            "Executing task: '%s' (%s, priority %d)",
+            target_task.task_id,
+            target_task.tier.value,
+            target_task.priority,
+        )
 
         # Mode A: Switch engine if required
-        if self.engine_mgr.active_tier != target_task.tier:
+        prev_tier = getattr(self.engine_mgr, "active_tier", None)
+        if prev_tier != target_task.tier:
             logger.info("Transitioning active engine to %s...", target_task.tier.value)
             switched = self.engine_mgr.switch_to_tier(target_task.tier)
             if not switched:
                 logger.error("Failed to switch engine to %s.", target_task.tier.value)
                 return None
+            self.consecutive_tier_count = 1
+        else:
+            self.consecutive_tier_count += 1
 
         # Claim task atomically
-        if task_id:
-            task = self.db.claim_specific_task(task_id)
-        else:
-            task = self.db.claim_next_task(tier=target_task.tier, job_id=target_task.job_id)
-
+        task = self.db.claim_specific_task(target_task.task_id)
         if not task:
             return None
 
@@ -297,6 +370,9 @@ class Orchestrator:
                         file_path=art_path,
                         content_preview=summary,
                     )
+                    # Automatically ensure downstream System 1 verification
+                    if self.auto_verify and (art_path.endswith(".py") or task.task_type == TaskType.DEEP_SYNTHESIS):
+                        self._ensure_downstream_verification(task, art_path)
 
             active_prog = self.active_progress.get(task.task_id, prog)
             active_prog.is_completed = True
@@ -313,6 +389,20 @@ class Orchestrator:
             task.status = TaskStatus.COMPLETED
             task.result_payload = summary
             task.artifact_path = art_path
+
+        except VerificationFailedError as e:
+            logger.warning("Verification failed for task '%s': %s", task.task_id, e)
+            active_prog = self.active_progress.get(task.task_id, prog)
+            active_prog.is_completed = True
+            active_prog.error = str(e)
+            active_prog.save_to_file(self.progress_dir / f"{task.task_id}.json")
+            self.db.mark_task_failed(task.task_id, str(e))
+            task.status = TaskStatus.FAILED
+            task.error_message = str(e)
+
+            # Escalate: enqueue System 2 repair task!
+            if self.auto_repair:
+                self._enqueue_system2_repair(task, e)
 
         except TaskCancelledError as e:
             logger.info("Task '%s' was stopped by user.", task.task_id)
@@ -341,6 +431,69 @@ class Orchestrator:
             self.on_task_update(task)
 
         return task
+
+    def _ensure_downstream_verification(self, task: Task, artifact_path: str) -> Optional[Task]:
+        """
+        When a System 2 synthesis task completes and outputs Python code,
+        ensures a downstream System 1 FAST_VERIFY task is in place.
+        Rewires existing downstream dependents so they wait on verification.
+        """
+        downstream_ids = self.db.get_downstream_tasks(task.task_id)
+        # Check if an existing downstream task is already a FAST_VERIFY task
+        for d_id in downstream_ids:
+            dt = self.db.get_task(d_id)
+            if dt and dt.task_type == TaskType.FAST_VERIFY:
+                return dt
+
+        verify_task_id = f"verify_{task.task_id}"
+
+        # 1. Create the FAST_VERIFY task first so it exists in tasks table
+        v_task = self.db.create_task(
+            task_id=verify_task_id,
+            job_id=task.job_id,
+            title=f"Verify: {task.title}",
+            tier=Tier.SYSTEM_1,
+            task_type=TaskType.FAST_VERIFY,
+            prompt_template=f"Verify syntax and execute test suites on '{task.title}' ({artifact_path}).",
+            depends_on=[task.task_id],
+            priority=task.priority + 1,
+        )
+
+        # 2. Rewire existing downstream tasks so they depend on verify_task_id instead of task.task_id
+        self.db.rewire_dependencies(old_dep_id=task.task_id, new_dep_id=verify_task_id)
+        logger.info("Automatically injected downstream verification task '%s' for '%s'.", verify_task_id, task.task_id)
+        return v_task
+
+    def _enqueue_system2_repair(self, verify_task: Task, error: VerificationFailedError) -> Task:
+        """
+        Escalates a failed verification pass to System 2 by enqueuing a DEEP_SYNTHESIS repair task.
+        Rewires downstream dependents to wait on the repair task.
+        """
+        repair_id = f"repair_{verify_task.task_id}"
+
+        prompt = (
+            f"Automated verification failed and System 1 local repairs were exhausted.\n\n"
+            f"### Diagnostics:\n{error.message}\n\n"
+            f"### Failure Traceback:\n```text\n{error.failure_trace}\n```\n\n"
+            f"Fix and regenerate the complete, working implementation."
+        )
+
+        # 1. Create the repair task first so it exists in tasks table
+        repair_task = self.db.create_task(
+            task_id=repair_id,
+            job_id=verify_task.job_id,
+            title=f"Repair: {verify_task.title}",
+            tier=Tier.SYSTEM_2,
+            task_type=TaskType.DEEP_SYNTHESIS,
+            prompt_template=prompt,
+            depends_on=[],  # Ready immediately for System 2
+            priority=verify_task.priority + 2,
+        )
+
+        # 2. Rewire any downstream tasks that were waiting on verify_task to now wait on repair_task
+        self.db.rewire_dependencies(old_dep_id=verify_task.task_id, new_dep_id=repair_id)
+        logger.info("Enqueued System 2 repair task '%s' following failed verification.", repair_id)
+        return repair_task
 
     def run_all(
         self,

@@ -84,13 +84,23 @@ class NewsboatTool:
             self.db_path = Path(db_path)
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Connects in read-only URI mode to prevent any locking conflicts with Newsboat."""
-        # Convert path to absolute URI
+        """Connects in read-only immutable URI mode to prevent locking conflicts with Newsboat in WSL."""
         abs_path = self.db_path.resolve().as_posix()
-        uri = f"file:{abs_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        return conn
+        if abs_path.startswith("//"):
+            uri = f"file:{abs_path}?mode=ro&immutable=1"
+        else:
+            uri = f"file:///{abs_path.lstrip('/')}?mode=ro&immutable=1"
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            return conn
+        except sqlite3.OperationalError:
+            fallback_uri = f"file:{abs_path}?mode=ro"
+            conn = sqlite3.connect(fallback_uri, uri=True, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            return conn
 
     def list_feeds(self) -> list[dict[str, Any]]:
         """Lists all registered RSS feeds with total and unread article counts."""

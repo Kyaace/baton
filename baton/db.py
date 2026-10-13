@@ -29,19 +29,24 @@ DEFAULT_DB_PATH = Path("baton.db")
 class Database:
     """Deterministic SQLite DAG state engine and priority queue."""
 
-    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH):
+    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH, timeout: float = 5.0):
         self.db_path = Path(db_path)
+        self.timeout = timeout
         self.init_db()
 
     def get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute(f"PRAGMA busy_timeout = {int(self.timeout * 1000)};")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
 
     def init_db(self) -> None:
         """Create tables and indexes if they do not exist."""
         with self.get_connection() as conn:
+            if str(self.db_path) != ":memory:":
+                conn.execute("PRAGMA journal_mode = WAL;")
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_id TEXT PRIMARY KEY,
@@ -737,6 +742,41 @@ class Database:
                         "UPDATE jobs SET status = ?, completed_at = ? WHERE job_id = ?",
                         (JobStatus.COMPLETED.value, now, jid),
                     )
+
+    def get_downstream_tasks(self, task_id: str) -> list[str]:
+        """Returns a list of task_ids that directly depend on the given task_id."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM task_dependencies WHERE depends_on_task_id = ?",
+                (task_id,),
+            ).fetchall()
+            return [r["task_id"] for r in rows]
+
+    def rewire_dependencies(self, old_dep_id: str, new_dep_id: str) -> int:
+        """
+        Rewires task dependencies so any task waiting on old_dep_id
+        now depends on new_dep_id instead. Prevents self-dependency and duplicates.
+        """
+        with self.get_connection() as conn:
+            # Delete any existing pairs that would conflict with the update
+            conn.execute(
+                """
+                DELETE FROM task_dependencies
+                WHERE depends_on_task_id = ? AND task_id IN (
+                    SELECT task_id FROM task_dependencies WHERE depends_on_task_id = ?
+                )
+                """,
+                (old_dep_id, new_dep_id),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE task_dependencies
+                SET depends_on_task_id = ?
+                WHERE depends_on_task_id = ? AND task_id != ?
+                """,
+                (new_dep_id, old_dep_id, new_dep_id),
+            )
+            return cursor.rowcount
 
     def mark_task_failed(self, task_id: str, error_message: str) -> None:
         """Marks task failed with an error message."""

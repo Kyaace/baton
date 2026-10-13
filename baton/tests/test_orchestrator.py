@@ -49,7 +49,7 @@ def mock_orchestrator(tmp_path: Path):
     engine_mgr = MockEngineManager()
     sys1 = MockSystem1()
     sys2 = MockSystem2()
-    return Orchestrator(db=db, engine_manager=engine_mgr, system1=sys1, system2=sys2)
+    return Orchestrator(db=db, engine_manager=engine_mgr, system1=sys1, system2=sys2, auto_verify=False)
 
 
 def test_orchestrator_end_to_end_relay(mock_orchestrator: Orchestrator):
@@ -145,4 +145,263 @@ def test_orchestrator_recon_synth_verify_pipeline(mock_orchestrator: Orchestrato
     verify_art = [a for a in artifacts if a.task_id == "verify_3"][0]
     assert verify_art.artifact_type.value == "report"
     assert verify_art.title == "Verification: Verify Task"
+
+
+def test_orchestrator_auto_verify_injection(tmp_path: Path):
+    """Verify that when a System 2 synthesis task completes, a downstream FAST_VERIFY task is automatically injected."""
+    db = Database(tmp_path / "auto_verify_baton.db")
+    engine_mgr = MockEngineManager()
+    sys1 = MockSystem1()
+    sys2 = MockSystem2()
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=sys1, system2=sys2, auto_verify=True)
+
+    job = db.create_job("Auto Verify Job", "Test automatic verification injection")
+    db.create_task(
+        title="Synth Code",
+        tier=Tier.SYSTEM_2,
+        task_type=TaskType.DEEP_SYNTHESIS,
+        task_id="synth_main",
+        job_id=job.job_id,
+        priority=10,
+    )
+    db.create_task(
+        title="Consume Code",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_RECON,
+        task_id="downstream_step",
+        job_id=job.job_id,
+        depends_on=["synth_main"],
+        priority=5,
+    )
+
+    # Step 1: Run synth_main (System 2)
+    t1 = orch.step()
+    assert t1 is not None
+    assert t1.task_id == "synth_main"
+    assert t1.status == TaskStatus.COMPLETED
+
+    # Check that verify_synth_main was automatically injected and downstream_step was rewired
+    verify_task = db.get_task("verify_synth_main")
+    assert verify_task is not None
+    assert verify_task.task_type == TaskType.FAST_VERIFY
+    assert verify_task.status == TaskStatus.READY
+
+    downstream = db.get_task("downstream_step")
+    assert downstream.status == TaskStatus.BLOCKED
+    assert "verify_synth_main" in downstream.depends_on
+    assert "synth_main" not in downstream.depends_on
+
+    # Step 2: Run the auto-injected verify task (System 1)
+    t2 = orch.step()
+    assert t2 is not None
+    assert t2.task_id == "verify_synth_main"
+    assert t2.status == TaskStatus.COMPLETED
+
+    # Now downstream_step should be unblocked and READY
+    downstream_after = db.get_task("downstream_step")
+    assert downstream_after.status == TaskStatus.READY
+
+    # Step 3: Run downstream task
+    t3 = orch.step()
+    assert t3 is not None
+    assert t3.task_id == "downstream_step"
+    assert t3.status == TaskStatus.COMPLETED
+
+
+def test_orchestrator_auto_repair_escalation(tmp_path: Path):
+    """Verify that when verification fails, Orchestrator enqueues a System 2 repair task and keeps dependents blocked."""
+    from baton.models import VerificationFailedError
+
+    db = Database(tmp_path / "repair_baton.db")
+    engine_mgr = MockEngineManager()
+    sys1 = MockSystem1()
+    sys2 = MockSystem2()
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=sys1, system2=sys2, auto_verify=False, auto_repair=True)
+
+    job = db.create_job("Repair Escalation Job", "Test escalation to System 2 repair")
+    db.create_task(
+        title="Verify Broken Module",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_VERIFY,
+        task_id="verify_target",
+        job_id=job.job_id,
+        priority=10,
+    )
+    db.create_task(
+        title="Deploy Code",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_RECON,
+        task_id="deploy_step",
+        job_id=job.job_id,
+        depends_on=["verify_target"],
+        priority=5,
+    )
+
+    # Mock sys1 to simulate verification failure after retries
+    sys1.execute_task = MagicMock(side_effect=VerificationFailedError(
+        message="Verification failed: 2 tests broken",
+        failure_trace="AssertionError: 1 != 2",
+        target_code="def broken(): pass",
+    ))
+
+    # Step 1: Step the queue on verify_target -> should fail and trigger repair
+    t1 = orch.step()
+    assert t1 is not None
+    assert t1.task_id == "verify_target"
+    assert t1.status == TaskStatus.FAILED
+
+    # Check that a System 2 repair task was automatically created and is READY
+    repair_task = db.get_task("repair_verify_target")
+    assert repair_task is not None
+    assert repair_task.tier == Tier.SYSTEM_2
+    assert repair_task.task_type == TaskType.DEEP_SYNTHESIS
+    assert repair_task.status == TaskStatus.READY
+    assert "AssertionError: 1 != 2" in repair_task.prompt_template
+
+    # Check that deploy_step is still BLOCKED and rewired to wait on the repair task
+    deploy = db.get_task("deploy_step")
+    assert deploy.status == TaskStatus.BLOCKED
+    assert "repair_verify_target" in deploy.depends_on
+
+    # Step 2: Run the repair task on System 2
+    t2 = orch.step()
+    assert t2 is not None
+    assert t2.task_id == "repair_verify_target"
+    assert t2.status == TaskStatus.COMPLETED
+
+    # Now deploy_step is unblocked and READY
+    deploy_after = db.get_task("deploy_step")
+    assert deploy_after.status == TaskStatus.READY
+
+
+def test_tier_sticky_scheduling_drains_warm_system1(tmp_path: Path):
+    """Verify that when System 1 is warm, all runnable System 1 tasks drain before switching to System 2,
+    even if the System 2 task has a higher scalar priority."""
+    db = Database(tmp_path / "sticky_sys1.db")
+    engine_mgr = MockEngineManager()
+    engine_mgr.active_tier = Tier.SYSTEM_1  # System 1 is warm
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=MockSystem1(), system2=MockSystem2(), auto_verify=False, tier_sticky=True)
+
+    job = db.create_job("Sticky Sys1 Job", "Test batching on System 1")
+    # Low priority Sys1 tasks
+    db.create_task(title="Sys1 Recon A", tier=Tier.SYSTEM_1, task_id="sys1_a", job_id=job.job_id, priority=3)
+    db.create_task(title="Sys1 Recon B", tier=Tier.SYSTEM_1, task_id="sys1_b", job_id=job.job_id, priority=4)
+    # High priority Sys2 task
+    db.create_task(title="Sys2 Synth X", tier=Tier.SYSTEM_2, task_id="sys2_x", job_id=job.job_id, priority=10)
+
+    # Step 1: Should run sys1_b (prio 4) because System 1 is warm
+    t1 = orch.step()
+    assert t1 is not None
+    assert t1.task_id == "sys1_b"
+    assert engine_mgr.active_tier == Tier.SYSTEM_1
+
+    # Step 2: Should run sys1_a (prio 3) because System 1 is still warm
+    t2 = orch.step()
+    assert t2 is not None
+    assert t2.task_id == "sys1_a"
+    assert engine_mgr.active_tier == Tier.SYSTEM_1
+
+    # Step 3: All Sys1 tasks drained -> now switch to System 2 for sys2_x
+    t3 = orch.step()
+    assert t3 is not None
+    assert t3.task_id == "sys2_x"
+    assert engine_mgr.active_tier == Tier.SYSTEM_2
+
+
+def test_tier_sticky_scheduling_drains_warm_system2(tmp_path: Path):
+    """Verify that when System 2 (Colibrì) is warm, all runnable System 2 tasks drain before switching to System 1,
+    preventing premature unloading of 284B MoE weights."""
+    db = Database(tmp_path / "sticky_sys2.db")
+    engine_mgr = MockEngineManager()
+    engine_mgr.active_tier = Tier.SYSTEM_2  # Colibrì is warm
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=MockSystem1(), system2=MockSystem2(), auto_verify=False, tier_sticky=True)
+
+    job = db.create_job("Sticky Sys2 Job", "Test batching on System 2")
+    db.create_task(title="Sys2 Synth A", tier=Tier.SYSTEM_2, task_id="sys2_a", job_id=job.job_id, priority=3)
+    db.create_task(title="Sys2 Synth B", tier=Tier.SYSTEM_2, task_id="sys2_b", job_id=job.job_id, priority=4)
+    db.create_task(title="Sys1 Urgent Recon", tier=Tier.SYSTEM_1, task_id="sys1_urgent", job_id=job.job_id, priority=10)
+
+    # Step 1: Drains sys2_b on warm System 2
+    t1 = orch.step()
+    assert t1 is not None
+    assert t1.task_id == "sys2_b"
+    assert engine_mgr.active_tier == Tier.SYSTEM_2
+
+    # Step 2: Drains sys2_a on warm System 2
+    t2 = orch.step()
+    assert t2 is not None
+    assert t2.task_id == "sys2_a"
+    assert engine_mgr.active_tier == Tier.SYSTEM_2
+
+    # Step 3: Now switches to System 1 for sys1_urgent
+    t3 = orch.step()
+    assert t3 is not None
+    assert t3.task_id == "sys1_urgent"
+    assert engine_mgr.active_tier == Tier.SYSTEM_1
+
+
+def test_tier_sticky_cold_start_prioritizes_system1(tmp_path: Path):
+    """Verify that on cold start (active_tier is None), System 1 tasks run first to unblock downstream nodes."""
+    db = Database(tmp_path / "cold_start.db")
+    engine_mgr = MockEngineManager()  # active_tier is None
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=MockSystem1(), system2=MockSystem2(), auto_verify=False, tier_sticky=True)
+
+    job = db.create_job("Cold Start Job", "Test cold start priority")
+    db.create_task(title="Sys2 Task High", tier=Tier.SYSTEM_2, task_id="sys2_high", job_id=job.job_id, priority=10)
+    db.create_task(title="Sys1 Recon Low", tier=Tier.SYSTEM_1, task_id="sys1_low", job_id=job.job_id, priority=2)
+
+    # Cold start should pick Sys1
+    t1 = orch.step()
+    assert t1 is not None
+    assert t1.task_id == "sys1_low"
+    assert engine_mgr.active_tier == Tier.SYSTEM_1
+
+
+def test_tier_sticky_starvation_threshold(tmp_path: Path):
+    """Verify that when a warm tier hits the starvation threshold, it yields to the waiting other tier."""
+    db = Database(tmp_path / "starvation.db")
+    engine_mgr = MockEngineManager()
+    engine_mgr.active_tier = Tier.SYSTEM_1
+    # Starvation threshold of 2 tasks
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=MockSystem1(), system2=MockSystem2(), auto_verify=False, tier_sticky=True, starvation_threshold=2)
+
+    job = db.create_job("Starvation Job", "Test starvation threshold")
+    db.create_task(title="Sys1 Task 1", tier=Tier.SYSTEM_1, task_id="sys1_1", job_id=job.job_id, priority=5)
+    db.create_task(title="Sys1 Task 2", tier=Tier.SYSTEM_1, task_id="sys1_2", job_id=job.job_id, priority=5)
+    db.create_task(title="Sys1 Task 3", tier=Tier.SYSTEM_1, task_id="sys1_3", job_id=job.job_id, priority=5)
+    db.create_task(title="Sys2 Waiting", tier=Tier.SYSTEM_2, task_id="sys2_wait", job_id=job.job_id, priority=10)
+
+    # Step 1: Sys1 runs (count = 1)
+    t1 = orch.step()
+    assert t1 is not None
+    assert t1.task_id == "sys1_1"
+
+    # Step 2: Sys1 runs (count = 2)
+    t2 = orch.step()
+    assert t2 is not None
+    assert t2.task_id == "sys1_2"
+
+    # Step 3: Count has reached 2 (threshold), so it yields to Sys2
+    t3 = orch.step()
+    assert t3 is not None
+    assert t3.task_id == "sys2_wait"
+    assert engine_mgr.active_tier == Tier.SYSTEM_2
+
+
+def test_tier_sticky_disabled_uses_scalar_priority(tmp_path: Path):
+    """Verify that if tier_sticky=False, execution strictly obeys scalar priority."""
+    db = Database(tmp_path / "no_sticky.db")
+    engine_mgr = MockEngineManager()
+    engine_mgr.active_tier = Tier.SYSTEM_1
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=MockSystem1(), system2=MockSystem2(), auto_verify=False, tier_sticky=False)
+
+    job = db.create_job("Scalar Job", "Strict scalar priority")
+    db.create_task(title="Sys1 Low", tier=Tier.SYSTEM_1, task_id="sys1_low", job_id=job.job_id, priority=1)
+    db.create_task(title="Sys2 High", tier=Tier.SYSTEM_2, task_id="sys2_high", job_id=job.job_id, priority=10)
+
+    t1 = orch.step()
+    assert t1 is not None
+    assert t1.task_id == "sys2_high"
+    assert engine_mgr.active_tier == Tier.SYSTEM_2
+
 

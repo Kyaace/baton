@@ -228,3 +228,111 @@ def test_system1_execute_task_named_sandbox_tool(tmp_path: Path):
     assert Path(art_path).exists()
     assert "# Verification Dossier:" in Path(art_path).read_text(encoding="utf-8")
 
+
+def test_system1_local_repair_syntax_error(tmp_path: Path):
+    """Verify that System 1 automatically fixes syntax errors during fast_verify and updates the artifact."""
+    from unittest.mock import MagicMock
+    from baton.models import Task, TaskType, Tier
+    from baton.system1 import System1Runner
+
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox")
+    runner = System1Runner(artifacts_dir=tmp_path / "dossiers", sandbox_tool=sandbox, max_repair_retries=2)
+
+    broken_code = "def compute_velocity(distance, time_val\n    return distance / time_val\n\ndef test_velocity():\n    assert compute_velocity(100, 20) == 5\n"
+    synth_file = tmp_path / "velocity.py"
+    synth_file.write_text(broken_code, encoding="utf-8")
+
+    upstream = [{"task_id": "synth_1", "title": "Synth Velocity", "artifact_path": str(synth_file), "result_payload": "Synth done"}]
+    verify_task = Task(
+        task_id="verify_vel",
+        job_id="job_1",
+        title="Verify Velocity",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_VERIFY,
+    )
+
+    fixed_code = "```python\ndef compute_velocity(distance, time_val):\n    return distance / time_val\n\ndef test_velocity():\n    assert compute_velocity(100, 20) == 5\n```"
+    # First call: patch generation; Second call: verifier dossier compilation
+    runner.generate = MagicMock(side_effect=[
+        {"response": fixed_code, "tokens_generated": 40, "elapsed_seconds": 0.3},
+        {"response": "VERIFIED: Repaired syntax error successfully.", "tokens_generated": 30, "elapsed_seconds": 0.2},
+    ])
+
+    summary, art_path, tokens, elapsed = runner.execute_task(verify_task, upstream_dossiers=upstream)
+
+    # Verify that the original artifact on disk was repaired
+    repaired_disk_content = synth_file.read_text(encoding="utf-8")
+    assert "def compute_velocity(distance, time_val):" in repaired_disk_content
+
+    # Verify report was generated
+    assert Path(art_path).exists()
+    dossier = Path(art_path).read_text(encoding="utf-8")
+    assert "VERIFIED" in dossier
+
+
+def test_system1_local_repair_failing_assertion(tmp_path: Path):
+    """Verify that System 1 automatically repairs failing pytest assertions."""
+    from unittest.mock import MagicMock
+    from baton.models import Task, TaskType, Tier
+    from baton.system1 import System1Runner
+
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox")
+    runner = System1Runner(artifacts_dir=tmp_path / "dossiers", sandbox_tool=sandbox, max_repair_retries=2)
+
+    buggy_code = "def multiply(a, b):\n    return a + b\n\ndef test_multiply():\n    assert multiply(3, 4) == 12\n"
+    synth_file = tmp_path / "calc.py"
+    synth_file.write_text(buggy_code, encoding="utf-8")
+
+    upstream = [{"task_id": "synth_1", "title": "Synth Calc", "artifact_path": str(synth_file), "result_payload": "Synth done"}]
+    verify_task = Task(
+        task_id="verify_calc",
+        job_id="job_1",
+        title="Verify Calc",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_VERIFY,
+    )
+
+    fixed_code = "```python\ndef multiply(a, b):\n    return a * b\n\ndef test_multiply():\n    assert multiply(3, 4) == 12\n```"
+    runner.generate = MagicMock(side_effect=[
+        {"response": fixed_code, "tokens_generated": 35, "elapsed_seconds": 0.3},
+        {"response": "VERIFIED: Repaired arithmetic bug in multiplication.", "tokens_generated": 25, "elapsed_seconds": 0.2},
+    ])
+
+    summary, art_path, tokens, elapsed = runner.execute_task(verify_task, upstream_dossiers=upstream)
+
+    # Check that disk content has the fixed multiplier
+    assert "return a * b" in synth_file.read_text(encoding="utf-8")
+
+
+def test_system1_verification_exhausted_raises_error(tmp_path: Path):
+    """Verify that when local repair retries fail to resolve errors, VerificationFailedError is raised."""
+    from unittest.mock import MagicMock
+    from baton.models import Task, TaskType, Tier, VerificationFailedError
+    from baton.system1 import System1Runner
+
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox")
+    runner = System1Runner(artifacts_dir=tmp_path / "dossiers", sandbox_tool=sandbox, max_repair_retries=2)
+
+    broken_code = "def impossible():\n    assert 1 == 2\n\ndef test_imp():\n    impossible()\n"
+    synth_file = tmp_path / "impossible.py"
+    synth_file.write_text(broken_code, encoding="utf-8")
+
+    upstream = [{"task_id": "synth_1", "title": "Synth Impossible", "artifact_path": str(synth_file), "result_payload": "Synth done"}]
+    verify_task = Task(
+        task_id="verify_imp",
+        job_id="job_1",
+        title="Verify Impossible",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_VERIFY,
+    )
+
+    # Emits answers that still fail
+    still_broken = "```python\ndef impossible():\n    assert False\n\ndef test_imp():\n    impossible()\n```"
+    runner.generate = MagicMock(return_value={"response": still_broken, "tokens_generated": 20, "elapsed_seconds": 0.2})
+
+    with pytest.raises(VerificationFailedError) as exc_info:
+        runner.execute_task(verify_task, upstream_dossiers=upstream)
+
+    assert exc_info.value.artifact_path is not None
+    assert "impossible.py" in exc_info.value.target_code or "impossible" in exc_info.value.target_code
+

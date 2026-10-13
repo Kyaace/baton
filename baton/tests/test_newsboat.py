@@ -138,3 +138,20 @@ def test_newsboat_tool_execute_dispatcher(mock_newsboat_db: Path):
     read_str = nb.execute("rss_read_article", {"id": 1})
     assert "Breakthrough in Solid-State" in read_str
     assert "Alice Scientist" in read_str
+
+
+def test_newsboat_tool_connection_immutable_and_timeout(mock_newsboat_db: Path):
+    """Verify that NewsboatTool opens the SQLite database with immutable read-only mode and busy_timeout."""
+    nb = NewsboatTool(db_path=mock_newsboat_db)
+    with nb._get_connection() as conn:
+        # Check busy timeout pragma
+        busy_timeout = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+        assert busy_timeout == 5000
+
+        # Verify read operations work cleanly
+        feeds = conn.execute("SELECT COUNT(*) FROM rss_feed").fetchone()[0]
+        assert feeds == 2
+
+        # Verify that write operations are rejected because mode=ro is enforced
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO rss_feed (rssurl, title) VALUES ('https://bad.com', 'Bad')")

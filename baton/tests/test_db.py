@@ -181,3 +181,76 @@ def test_delete_task_cascades_readiness(temp_db: Database):
     # task_b should now be unblocked and READY
     tb_after = temp_db.get_task("task_b")
     assert tb_after.status == TaskStatus.READY
+
+
+def test_database_wal_mode_and_pragmas(temp_db: Database):
+    """Verify that SQLite initializes with WAL mode, foreign keys, and busy timeout."""
+    with temp_db.get_connection() as conn:
+        journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        assert journal_mode.lower() == "wal"
+
+        foreign_keys = conn.execute("PRAGMA foreign_keys;").fetchone()[0]
+        assert foreign_keys == 1
+
+        busy_timeout = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+        assert busy_timeout == 5000
+
+        synchronous = conn.execute("PRAGMA synchronous;").fetchone()[0]
+        # 1 corresponds to NORMAL
+        assert synchronous == 1
+
+
+def test_database_concurrent_reader_and_writer(tmp_path: Path):
+    """Verify that a reader can read concurrently while a writer holds an active write transaction."""
+    import threading
+    import time
+
+    db_path = tmp_path / "test_concurrent.db"
+    db = Database(db_path)
+
+    writer_started = threading.Event()
+    reader_done = threading.Event()
+    read_results = []
+    errors = []
+
+    def writer_worker():
+        try:
+            conn = db.get_connection()
+            with conn:
+                conn.execute(
+                    "INSERT INTO jobs (job_id, title, goal, status) VALUES (?, ?, ?, ?)",
+                    ("job_write", "Concurrent Job", "Testing WAL", "pending"),
+                )
+                writer_started.set()
+                # Hold the transaction open while reader queries
+                time.sleep(0.3)
+            conn.close()
+        except Exception as e:
+            errors.append(e)
+
+    def reader_worker():
+        try:
+            writer_started.wait(timeout=2.0)
+            # Reader opens connection while writer's transaction is still active
+            conn = db.get_connection()
+            rows = conn.execute("SELECT * FROM jobs").fetchall()
+            read_results.append(len(rows))
+            conn.close()
+        except Exception as e:
+            errors.append(e)
+        finally:
+            reader_done.set()
+
+    t_writer = threading.Thread(target=writer_worker)
+    t_reader = threading.Thread(target=reader_worker)
+
+    t_writer.start()
+    t_reader.start()
+
+    t_writer.join(timeout=3.0)
+    t_reader.join(timeout=3.0)
+
+    assert not errors, f"Errors occurred during concurrent access: {errors}"
+    assert reader_done.is_set()
+    # In WAL mode, snapshot isolation allows reader to read without getting 'database is locked'
+    assert len(read_results) == 1

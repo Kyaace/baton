@@ -61,6 +61,23 @@ class TaskCancelledError(Exception):
     pass
 
 
+class VerificationFailedError(Exception):
+    """Raised when an automated verification pass fails and local System 1 repairs fail."""
+
+    def __init__(
+        self,
+        message: str,
+        artifact_path: Optional[str] = None,
+        failure_trace: str = "",
+        target_code: str = "",
+    ):
+        super().__init__(message)
+        self.message = message
+        self.artifact_path = artifact_path
+        self.failure_trace = failure_trace
+        self.target_code = target_code
+
+
 class TaskPlan(BaseModel):
     """Specification for a task emitted by System 2 planner or human input."""
     id: str
