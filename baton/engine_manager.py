@@ -190,7 +190,7 @@ class EngineManager:
     # Colibrì / System 2 Management
     # -------------------------------------------------------------------------
 
-    def start_colibri(self, timeout_sec: int = 45) -> bool:
+    def start_colibri(self, timeout_sec: int = 60) -> bool:
         """Starts System 2 / Colibrì server using configured hook, script, or endpoint check."""
         if self.is_colibri_online():
             logger.info("Colibrì server is already online.")
@@ -199,12 +199,14 @@ class EngineManager:
         if self.colibri_start_cmd:
             subprocess.run(self.colibri_start_cmd, cwd=str(self.repo_root), shell=True, check=False)
         else:
-            # Check local repository candidates
+            # Check local repository candidates and legacy local_llm fallback
             script_candidates = [
                 self.repo_root / "scripts" / "run_deepseek_v4_gpu.bat",
-                self.repo_root / "scripts" / "run_deepseek_v4_gpu.sh",
                 self.repo_root / "scripts" / "start_coli_server.bat",
+                self.repo_root / "scripts" / "run_deepseek_v4_gpu.sh",
                 self.repo_root / "scripts" / "start_coli_server.sh",
+                Path("E:/dev/Antigravity/local_llm/scripts/run_deepseek_v4_gpu.bat"),
+                Path("E:/dev/Antigravity/local_llm/scripts/start_coli_server.bat"),
             ]
             found_script = next((s for s in script_candidates if s.exists()), None)
             if found_script:
@@ -241,6 +243,8 @@ class EngineManager:
             script_candidates = [
                 self.repo_root / "scripts" / "stop_coli_server.bat",
                 self.repo_root / "scripts" / "stop_coli_server.sh",
+                Path("E:/dev/Antigravity/local_llm/scripts/stop_coli_server.bat"),
+                Path("E:/dev/Antigravity/local_llm/scripts/stop_coli_server.sh"),
             ]
             found_script = next((s for s in script_candidates if s.exists()), None)
             if found_script:
@@ -248,11 +252,22 @@ class EngineManager:
 
             # Check for local coli CLI wrapper if present
             coli_cmd = self.repo_root / "coli.cmd"
+            if not coli_cmd.exists():
+                coli_cmd = Path("E:/dev/Antigravity/local_llm/coli.cmd")
             if coli_cmd.exists():
                 subprocess.run(
                     [str(coli_cmd), "stop"],
                     cwd=str(self.repo_root),
                     shell=True,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+            # Ensure WSL Colibri process is stopped
+            if os.name == "nt":
+                subprocess.run(
+                    ["wsl", "-e", "/mnt/e/dev/Antigravity/local_llm/colibri/c/coli", "stop"],
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,

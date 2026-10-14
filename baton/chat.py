@@ -101,6 +101,27 @@ SHELF_TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_help",
+            "description": (
+                "Provides help, parameter descriptions, accepted aliases, and working examples "
+                "for any tool command. If you are ever unsure how to call a tool or encounter an error, "
+                "call this tool for immediate guidance."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Name of the tool to get help for (e.g. 'add_task', 'start_orchestration', 'activate_tool_bundle', 'step_queue', 'wiki_read_section').",
+                    },
+                },
+                "required": ["tool_name"],
+            },
+        },
+    },
 ]
 
 # -----------------------------------------------------------------------------
@@ -258,6 +279,27 @@ BATON_QUEUE_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     "task_id": {
                         "type": "string",
                         "description": "Optional specific ready task_id to execute.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_orchestration",
+            "description": (
+                "Starts or resumes execution of the Baton task queue. "
+                "Deterministically steps runnable tasks in priority order (up to max_steps), "
+                "handling engine execution and recording artifacts. "
+                "Call this immediately after queueing tasks when the user requests project execution or building."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Maximum number of ready tasks to execute in this run (default: 5).",
                     },
                 },
             },
@@ -1199,6 +1241,81 @@ BATON_TOOLS_SCHEMA: list[dict[str, Any]] = (
 )
 
 # -----------------------------------------------------------------------------
+# Curated On-Demand Tool Cheatsheets (Accessed via tool_help)
+# -----------------------------------------------------------------------------
+
+CURATED_TOOL_CHEATSHEETS: dict[str, dict[str, Any]] = {
+    "add_task": {
+        "summary": "Adds a new task to the Baton priority queue with dependencies and execution tier.",
+        "parameters": {
+            "title": "(string, required) Short clear title for the task.",
+            "tier": "(string, required) 'system_1' (fast recon/verify) or 'system_2' (deep synthesis). Aliases: system1, system2, sys1, sys2, 1, 2.",
+            "prompt": "(string, required) Detailed requirements/prompt instructions. Aliases: description, instructions, details.",
+            "depends_on": "(list[string], optional) Task IDs or task titles this task depends on. Aliases: dependencies.",
+            "task_type": "(string, optional) 'fast_recon' | 'fast_verify' | 'deep_synthesis'.",
+            "tool_name": "(string, optional) Recon tool to execute for System 1 tasks (e.g. 'wiki_read_section', 'docs_search').",
+            "tool_params": "(object, optional) Parameters passed to the recon tool. Aliases: params, arguments.",
+            "priority": "(integer, optional) Priority 1-10 (default: 5).",
+        },
+        "canonical_dag_example": [
+            {
+                "step": 1,
+                "description": "Create System 1 recon task",
+                "call": "add_task(title='Boids Algorithm Recon', tier='system_1', prompt='Extract flocking formulas for separation, alignment, cohesion', tool_name='wiki_read_section', tool_params={'title': 'Boids', 'section': 'Behavioral rules'})",
+            },
+            {
+                "step": 2,
+                "description": "Create System 2 synthesis task dependent on upstream recon (can use title or task_id)",
+                "call": "add_task(title='Boids Simulation Script', tier='system_2', prompt='Write 20-boid Python simulation in 100x100 space with 5m sensing range based on upstream dossier', depends_on=['Boids Algorithm Recon'])",
+            },
+        ],
+    },
+    "activate_tool_bundle": {
+        "summary": "Pulls a tool bundle from the shelf and activates it on your active toolbelt.",
+        "parameters": {
+            "bundle_name": "(string, required) Name of bundle to activate ('baton', 'library', 'newsboat', 'sandbox', 'sdr', 'time', 'docs', 'vault'). Aliases: tool_bundle, bundle.",
+        },
+        "example": "activate_tool_bundle(bundle_name='library')",
+    },
+    "deactivate_tool_bundle": {
+        "summary": "Returns an active tool bundle to the shelf to free context tokens.",
+        "parameters": {
+            "bundle_name": "(string, required) Name of bundle to deactivate. Aliases: tool_bundle, bundle.",
+        },
+        "example": "deactivate_tool_bundle(bundle_name='library')",
+    },
+    "step_queue": {
+        "summary": "Executes a single ready task from the priority queue and records artifacts.",
+        "parameters": {
+            "task_id": "(string, optional) Specific ready task_id to execute. If omitted, executes the highest priority ready task.",
+        },
+        "example": "step_queue()",
+    },
+    "start_orchestration": {
+        "summary": "Deterministically executes runnable tasks in the queue (up to max_steps). Handles engine execution seamlessly in Python.",
+        "parameters": {
+            "max_steps": "(integer, optional) Maximum number of ready tasks to execute in sequence (default: 5).",
+        },
+        "example": "start_orchestration(max_steps=5)",
+    },
+    "list_tasks": {
+        "summary": "Lists tasks in the queue with IDs, status, priority, and dependencies.",
+        "parameters": {
+            "status": "(string, optional) Filter by status ('ready', 'blocked', 'completed', 'failed', 'in_progress').",
+            "limit": "(integer, optional) Maximum tasks to return (default: 20).",
+        },
+        "example": "list_tasks(status='ready')",
+    },
+    "tool_help": {
+        "summary": "Provides documentation, accepted parameter aliases, usage instructions, and working examples for any tool.",
+        "parameters": {
+            "tool_name": "(string, required) Name of the tool to inspect (e.g. 'add_task', 'start_orchestration').",
+        },
+        "example": "tool_help(tool_name='add_task')",
+    },
+}
+
+# -----------------------------------------------------------------------------
 # System Prompt for System 1 Copilot with Tool Shelf Awareness
 # -----------------------------------------------------------------------------
 
@@ -1211,8 +1328,8 @@ Architecture:
 
 TOOL SHELF ARCHITECTURE:
 To prevent context window bloat and tool distraction, tools are organized into modular bundles on a 'shelf':
-- 'core' (ACTIVE): Baseline shelf controls (list_tool_bundles, activate_tool_bundle, deactivate_tool_bundle).
-- 'baton' (ON SHELF / ACTIVE in Chat): Baton queue management, task creation (add_task), queue stepping, and artifact review.
+- 'core' (ACTIVE): Baseline shelf controls (list_tool_bundles, activate_tool_bundle, deactivate_tool_bundle, tool_help).
+- 'baton' (ACTIVE in Chat): Baton queue management, task creation (add_task), queue stepping, start_orchestration, and artifact review.
 - 'library' (ON SHELF): Offline Kiwix ZIM archive explorer and reader. Inspects, searches, and reads from any locally mounted .zim files on disk (general knowledge, Python documentation, medical references, etc.).
 - 'newsboat' (ON SHELF): Offline RSS news monitoring across 12+ tech/science feeds (Ars Technica, Nature, NASA, MIT Tech Review, Krebs, etc.).
 - 'sandbox' (ON SHELF): Isolated Python execution, AST syntax verification, and pytest test suite runner.
@@ -1221,7 +1338,7 @@ To prevent context window bloat and tool distraction, tools are organized into m
 - 'docs' (ON SHELF): Offline API and technical documentation (Dash/Zeal .docset archives) for exact method signatures, classes, and docstrings.
 - 'vault' (ON SHELF): Personal local notes and project artifact search powered by SQLite FTS5 with BM25 ranking.
 
-If you need capabilities from an inactive bundle on the shelf, call `activate_tool_bundle(bundle_name="baton" | "library" | "newsboat" | "sandbox" | "sdr" | "time" | "docs" | "vault")`.
+If you need capabilities from an inactive bundle on the shelf, call `activate_tool_bundle(bundle_name="library" | "newsboat" | "sandbox" | "sdr" | "time" | "docs" | "vault")`.
 Once activated, those tools immediately become available on your toolbelt for subsequent tool calls.
 You can return a bundle to the shelf when finished using `deactivate_tool_bundle(bundle_name=...)` to free context tokens.
 
@@ -1233,11 +1350,13 @@ Your Roles & Capabilities:
    - Create 'system_1' tasks for fact extraction, formulas, news digests, or verification.
    - Create 'system_2' tasks for deep mathematical derivations, multi-file code synthesis, or complete modules.
    - Set up dependencies using `depends_on` so System 2 tasks automatically receive upstream dossiers.
-5. Keep the user updated on the queue state, and offer to step ready tasks or add dependencies.
+5. Start orchestration when ready: call `start_orchestration()` to execute queued tasks without waiting.
 
 Guidelines:
+- When the user requests task creation or project execution, call the appropriate tools immediately.
+- The 'core' and 'baton' bundles are active on your toolbelt by default.
+- If you are ever unsure of a tool's parameters or usage, call `tool_help(tool_name=...)`.
 - Keep your conversational answers crisp, clear, and proactive.
-- When calling tools, explain what you are doing.
 - When adding tasks, ensure the prompt is thorough and specific with zero placeholders.
 - Always be helpful, objective, and mathematically precise.
 """
@@ -1450,8 +1569,78 @@ class BatonChatSession:
                     })
                 return {"shelf": shelf_items, "active_bundles": list(self.active_bundles)}
 
+            elif name == "tool_help":
+                tool_name = (
+                    args.get("tool_name")
+                    or args.get("tool")
+                    or args.get("name")
+                    or ""
+                ).strip().lower()
+                if not tool_name:
+                    return {
+                        "error": "Missing required argument 'tool_name'. Usage: tool_help(tool_name='add_task')",
+                        "curated_tools": list(CURATED_TOOL_CHEATSHEETS.keys()),
+                    }
+
+                # 1. Curated specific help / cheatsheet lookup
+                if tool_name in CURATED_TOOL_CHEATSHEETS:
+                    return {
+                        "tool": tool_name,
+                        "source": "curated_cheatsheet",
+                        **CURATED_TOOL_CHEATSHEETS[tool_name],
+                    }
+
+                # 2. Dynamic docstring and JSON schema fallback
+                schema_fn = None
+                for item in BATON_TOOLS_SCHEMA:
+                    fn = item.get("function", {})
+                    if fn.get("name") == tool_name:
+                        schema_fn = fn
+                        break
+
+                if schema_fn:
+                    props = schema_fn.get("parameters", {}).get("properties", {})
+                    param_details = {}
+                    for p_name, p_info in props.items():
+                        p_type = p_info.get("type", "any")
+                        p_desc = p_info.get("description", "")
+                        param_details[p_name] = f"({p_type}) {p_desc}"
+
+                    # Also inspect Python method docstring if available
+                    method_doc = ""
+                    tool_method = getattr(self, tool_name, None)
+                    if tool_method and tool_method.__doc__:
+                        method_doc = tool_method.__doc__.strip()
+
+                    res_help: dict[str, Any] = {
+                        "tool": tool_name,
+                        "source": "schema_fallback",
+                        "description": schema_fn.get("description", ""),
+                        "parameters": param_details,
+                        "required": schema_fn.get("parameters", {}).get("required", []),
+                    }
+                    if method_doc:
+                        res_help["docstring"] = method_doc
+                    return res_help
+
+                return {
+                    "error": f"Tool '{tool_name}' not found.",
+                    "active_tools": [t["function"]["name"] for t in self.get_active_tools_schema()],
+                    "tip": "Use list_tool_bundles to view available bundles and their tools.",
+                }
+
             elif name == "activate_tool_bundle":
-                raw_name = args["bundle_name"].lower().strip()
+                raw_name = (
+                    args.get("bundle_name")
+                    or args.get("tool_bundle")
+                    or args.get("bundle")
+                    or ""
+                ).lower().strip()
+                if not raw_name:
+                    return {
+                        "error": "Missing required argument 'bundle_name'. Usage: activate_tool_bundle(bundle_name='library')",
+                        "available_bundles": list(TOOL_BUNDLES.keys()),
+                    }
                 bundle_name = BUNDLE_ALIASES.get(raw_name, raw_name)
                 if bundle_name not in TOOL_BUNDLES:
                     return {
@@ -1500,7 +1689,17 @@ class BatonChatSession:
                 return res
 
             elif name == "deactivate_tool_bundle":
-                raw_name = args["bundle_name"].lower().strip()
+                raw_name = (
+                    args.get("bundle_name")
+                    or args.get("tool_bundle")
+                    or args.get("bundle")
+                    or ""
+                ).lower().strip()
+                if not raw_name:
+                    return {
+                        "error": "Missing required argument 'bundle_name'. Usage: deactivate_tool_bundle(bundle_name='...')",
+                        "active_bundles": list(self.active_bundles),
+                    }
                 bundle_name = BUNDLE_ALIASES.get(raw_name, raw_name)
                 if bundle_name == "core":
                     return {"error": "Cannot deactivate the 'core' bundle."}
@@ -1559,13 +1758,71 @@ class BatonChatSession:
                 }
 
             elif name == "add_task":
-                title = args["title"]
-                tier_str = args["tier"]
-                prompt = args.get("prompt", "")
-                depends_on = args.get("depends_on", [])
+                title = (args.get("title") or "").strip()
+                if not title:
+                    return {
+                        "error": "Missing required parameter 'title'. Usage: add_task(title='...', tier='system_1', prompt='...')",
+                        "tip": "Call tool_help(tool_name='add_task') for usage examples.",
+                    }
+
+                raw_tier = str(args.get("tier") or args.get("task_type") or "").strip().lower()
+                clean_tier = re.sub(r"[^a-z0-9]", "", raw_tier)
+                if clean_tier in ("system1", "sys1", "1"):
+                    tier_str = "system_1"
+                elif clean_tier in ("system2", "sys2", "2"):
+                    tier_str = "system_2"
+                else:
+                    return {
+                        "error": f"Invalid tier '{raw_tier}'. Valid tiers are 'system_1' (fast recon/verify) or 'system_2' (deep synthesis).",
+                        "tip": "Call tool_help(tool_name='add_task') for usage examples.",
+                    }
+
+                prompt = (
+                    args.get("prompt")
+                    or args.get("description")
+                    or args.get("instructions")
+                    or args.get("details")
+                    or ""
+                )
+
+                raw_deps = args.get("depends_on") or args.get("dependencies") or []
+                if isinstance(raw_deps, str):
+                    raw_deps = [raw_deps] if raw_deps.strip() else []
+
+                # Fuzzy resolution of dependencies:
+                # If dep is not an existing task_id, check if it matches an existing task title
+                resolved_deps = []
+                resolution_notes = []
+                all_tasks = self.db.get_all_tasks()
+                task_id_set = {t.task_id for t in all_tasks}
+                title_map = {t.title.strip().lower(): t.task_id for t in all_tasks}
+
+                for dep in raw_deps:
+                    dep_str = str(dep).strip()
+                    if not dep_str:
+                        continue
+                    if dep_str in task_id_set:
+                        resolved_deps.append(dep_str)
+                    elif dep_str.lower() in title_map:
+                        matched_id = title_map[dep_str.lower()]
+                        resolved_deps.append(matched_id)
+                        resolution_notes.append({"from_title": dep_str, "to_id": matched_id})
+                    else:
+                        # Partial/contains match
+                        matched = None
+                        for t in all_tasks:
+                            if dep_str.lower() in t.title.lower() or t.title.lower() in dep_str.lower():
+                                matched = t.task_id
+                                resolution_notes.append({"from_title": dep_str, "to_id": matched})
+                                break
+                        if matched:
+                            resolved_deps.append(matched)
+                        else:
+                            resolved_deps.append(dep_str)
+
                 task_type = args.get("task_type")
-                tool_name = args.get("tool_name")
-                tool_params = args.get("tool_params")
+                tool_name = args.get("tool_name") or args.get("tool")
+                tool_params = args.get("tool_params") or args.get("params") or args.get("arguments")
                 priority = args.get("priority", 5)
                 task_id = args.get("task_id")
 
@@ -1576,11 +1833,11 @@ class BatonChatSession:
                     prompt_template=prompt,
                     tool_name=tool_name,
                     tool_params=tool_params,
-                    depends_on=depends_on,
+                    depends_on=resolved_deps,
                     priority=priority,
                     task_id=task_id,
                 )
-                return {
+                res_task: dict[str, Any] = {
                     "success": True,
                     "task_id": task.task_id,
                     "title": task.title,
@@ -1589,6 +1846,9 @@ class BatonChatSession:
                     "depends_on": task.depends_on,
                     "priority": task.priority,
                 }
+                if resolution_notes:
+                    res_task["resolved_dependencies"] = resolution_notes
+                return res_task
 
             elif name == "delete_task":
                 task_id = args["task_id"]
@@ -1680,6 +1940,46 @@ class BatonChatSession:
                         "success": False,
                         "message": "No runnable task found in READY state to execute.",
                     }
+
+            elif name == "start_orchestration":
+                max_steps = int(args.get("max_steps", 5))
+                executed_tasks = []
+                for step_idx in range(max_steps):
+                    runnable = self.db.get_runnable_tasks()
+                    if not runnable:
+                        break
+                    completed = self.orchestrator.step()
+                    if completed:
+                        executed_tasks.append({
+                            "task_id": completed.task_id,
+                            "title": completed.title,
+                            "tier": completed.tier.value,
+                            "status": completed.status.value,
+                            "artifact_path": completed.artifact_path,
+                        })
+                    else:
+                        break
+
+                all_t = self.db.get_all_tasks()
+                status_counts: dict[str, int] = {}
+                for t in all_t:
+                    status_counts[t.status.value] = status_counts.get(t.status.value, 0) + 1
+                remaining_ready = status_counts.get("ready", 0)
+                remaining_blocked = status_counts.get("blocked", 0)
+
+                return {
+                    "success": True,
+                    "steps_executed": len(executed_tasks),
+                    "executed_tasks": executed_tasks,
+                    "queue_status": status_counts,
+                    "remaining_ready": remaining_ready,
+                    "remaining_blocked": remaining_blocked,
+                    "message": (
+                        f"Executed {len(executed_tasks)} task(s). {remaining_ready} ready, {remaining_blocked} blocked in queue."
+                        if executed_tasks
+                        else "No runnable tasks found in READY state."
+                    ),
+                }
 
             # Wikipedia Bundle Tools ('wikipedia')
             elif name == "wiki_search":
@@ -1952,6 +2252,19 @@ class BatonChatSession:
 
             # If no tools called, we have our final conversational response
             if not tool_calls:
+                # Check for degenerate thinking-only turn (model thought but didn't speak or call tools)
+                eval_count = data.get("eval_count", 0)
+                if not content.strip() and (thinking or eval_count > 0) and turn_count < max_turns:
+                    logger.info(
+                        "Detected empty generation with thinking/eval_count=%s. Issuing internal nudge.",
+                        eval_count,
+                    )
+                    self.messages.append({
+                        "role": "user",
+                        "content": "Please proceed by calling the required tool or answering the request.",
+                    })
+                    continue
+
                 self.messages.append({"role": "assistant", "content": content})
                 self._log_event("AGENT_RESPONSE", content)
                 telemetry = {
@@ -2036,7 +2349,51 @@ class BatonChatSession:
             return True
 
         elif cmd in ("/help", "/h"):
-            self.print_help()
+            if arg:
+                help_res = self.execute_tool("tool_help", {"tool_name": arg.strip()})
+                if "error" in help_res:
+                    console.print(f"[red]{help_res['error']}[/]")
+                else:
+                    console.print(f"[bold magenta]Tool Help:[/] [bold cyan]{help_res['tool']}[/] [dim]({help_res.get('source', '')})[/]")
+                    if "summary" in help_res:
+                        console.print(f"[white]{help_res['summary']}[/]\n")
+                    elif "description" in help_res:
+                        console.print(f"[white]{help_res['description']}[/]\n")
+                    if "parameters" in help_res:
+                        console.print("[bold]Parameters:[/]")
+                        for p, d in help_res["parameters"].items():
+                            console.print(f"  • [cyan]{p}[/]: {d}")
+                    if "example" in help_res:
+                        console.print(f"\n[bold]Example:[/] [green]{help_res['example']}[/]")
+                    elif "canonical_dag_example" in help_res:
+                        console.print("\n[bold]DAG Example:[/]")
+                        for s in help_res["canonical_dag_example"]:
+                            console.print(f"  Step {s['step']} [dim]({s.get('description', '')})[/]: [green]{s['call']}[/]")
+                    if "docstring" in help_res:
+                        console.print(f"\n[dim]{help_res['docstring']}[/]")
+            else:
+                self.print_help()
+            return True
+
+        elif cmd == "/toolhelp":
+            if not arg:
+                console.print("[yellow]Usage: /toolhelp <tool_name> (e.g. /toolhelp add_task)[/]")
+            else:
+                help_res = self.execute_tool("tool_help", {"tool_name": arg.strip()})
+                console.print(json.dumps(help_res, indent=2))
+            return True
+
+        elif cmd in ("/start", "/run"):
+            console.print("[cyan]Starting orchestration...[/]")
+            steps = int(arg) if arg.isdigit() else 5
+            res = self.execute_tool("start_orchestration", {"max_steps": steps})
+            executed = res.get("executed_tasks", [])
+            if executed:
+                for t in executed:
+                    console.print(f"[green]✓ Completed task:[/] [bold]{t['task_id']}[/] ({t['title']}) [{t['tier']}]")
+                console.print(f"[dim]{res.get('message', '')}[/]")
+            else:
+                console.print(f"[yellow]{res.get('message', 'No runnable tasks in READY state.')}[/]")
             return True
 
         elif cmd in ("/shelf", "/bundles"):
@@ -2221,6 +2578,8 @@ class BatonChatSession:
         table.add_row("/status", "Show engine statuses (Ollama, Colibrì) and queue counts")
         table.add_row("/artifacts", "List generated briefing dossiers and synthesis artifacts")
         table.add_row("/step [task_id]", "Step the queue and execute highest priority ready task")
+        table.add_row("/start or /run [max_steps]", "Start or resume autonomous orchestration of ready tasks (default: 5 steps)")
+        table.add_row("/help [tool_name] or /toolhelp <name>", "Inspect parameters, accepted aliases, and examples for any tool")
         table.add_row("/model <name>", f"Change active Ollama model (current: {self.model_name})")
         table.add_row("/sdr", "Probe RTL-SDR hardware and tuner status")
         table.add_row("/adsb [seconds]", "Scan Mode-S ADS-B 1090 MHz aircraft radar")

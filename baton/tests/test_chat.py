@@ -46,8 +46,8 @@ def chat_session(temp_db: Database, tmp_path: Path) -> BatonChatSession:
 def test_tool_schemas_validity():
     """Verify that all function definitions match standard JSON schema specs."""
     assert len(BATON_TOOLS_SCHEMA) >= 20
-    assert len(SHELF_TOOLS_SCHEMA) == 3
-    assert len(BATON_QUEUE_TOOLS_SCHEMA) == 9
+    assert len(SHELF_TOOLS_SCHEMA) == 4
+    assert len(BATON_QUEUE_TOOLS_SCHEMA) == 10
     assert len(SANDBOX_TOOLS_SCHEMA) == 6
     assert len(SDR_TOOLS_SCHEMA) == 6
 
@@ -72,9 +72,11 @@ def test_tool_schemas_validity():
         "read_artifact",
         "queue_status",
         "step_queue",
+        "start_orchestration",
         "list_tool_bundles",
         "activate_tool_bundle",
         "deactivate_tool_bundle",
+        "tool_help",
         "wiki_search",
         "wiki_read_section",
         "wiki_read_lead",
@@ -565,4 +567,153 @@ def test_library_bundle_activation_and_dynamic_mounted_corpora(chat_session: Bat
     assert res2["activated_bundle"] == "library"
     assert "library" in chat_session.active_bundles
     assert "mounted_corpora" in res2
+
+
+def test_tool_help_curated_and_fallback(chat_session: BatonChatSession):
+    """Verify tool_help returns curated cheatsheets when available, and falls back to schema/docstring."""
+    # 1. Curated cheatsheet for add_task
+    help_add = chat_session.execute_tool("tool_help", {"tool_name": "add_task"})
+    assert help_add["source"] == "curated_cheatsheet"
+    assert "canonical_dag_example" in help_add
+    assert "parameters" in help_add
+    assert "tier" in help_add["parameters"]
+
+    # 2. Curated cheatsheet for start_orchestration
+    help_orch = chat_session.execute_tool("tool_help", {"tool_name": "start_orchestration"})
+    assert help_orch["source"] == "curated_cheatsheet"
+    assert "max_steps" in help_orch["parameters"]
+
+    # 3. Schema fallback for python_eval (which has no curated entry)
+    help_eval = chat_session.execute_tool("tool_help", {"tool_name": "python_eval"})
+    assert help_eval["source"] == "schema_fallback"
+    assert "parameters" in help_eval
+    assert "code" in help_eval["parameters"]
+
+    # 4. Unknown tool error
+    help_err = chat_session.execute_tool("tool_help", {"tool_name": "completely_fictional_tool"})
+    assert "error" in help_err
+    assert "active_tools" in help_err
+
+
+def test_add_task_tier_normalization_and_parameter_aliasing(chat_session: BatonChatSession):
+    """Verify add_task normalizes tier variants and aliases description/dependencies/tool."""
+    # 1. System1 variant with 'description' alias instead of prompt
+    t1_res = chat_session.execute_tool(
+        "add_task",
+        {
+            "title": "Orbital Recon Alpha",
+            "tier": "system1",  # no underscore
+            "description": "Gather semi-major axis formulas.",
+            "dependencies": [],  # dependencies alias
+        },
+    )
+    assert t1_res["success"] is True
+    assert t1_res["tier"] == "system_1"
+    assert t1_res["status"] == "ready"
+
+    # Verify prompt in database was populated from 'description'
+    t1_db = chat_session.db.get_task(t1_res["task_id"])
+    assert t1_db is not None
+    assert t1_db.prompt_template == "Gather semi-major axis formulas."
+
+    # 2. System2 variant with 'System2' capitalization and 'instructions'
+    t2_res = chat_session.execute_tool(
+        "add_task",
+        {
+            "title": "Orbital Synthesis Beta",
+            "tier": "System2",  # capitalized
+            "instructions": "Synthesize Python Kepler propagator.",
+            "depends_on": [t1_res["task_id"]],
+        },
+    )
+    assert t2_res["success"] is True
+    assert t2_res["tier"] == "system_2"
+    assert t2_res["status"] == "blocked"
+
+    t2_db = chat_session.db.get_task(t2_res["task_id"])
+    assert t2_db is not None
+    assert t2_db.prompt_template == "Synthesize Python Kepler propagator."
+
+
+def test_fuzzy_dependency_resolution_by_title(chat_session: BatonChatSession):
+    """Verify that specifying task titles in dependencies automatically resolves to upstream task_ids."""
+    # Step 1: Create upstream task with title
+    recon_res = chat_session.execute_tool(
+        "add_task",
+        {
+            "title": "Boids Simulation Research",
+            "tier": "system_1",
+            "prompt": "Extract boid flocking rules.",
+        },
+    )
+    assert recon_res["success"] is True
+    recon_id = recon_res["task_id"]
+
+    # Step 2: Create downstream task passing title string in dependencies
+    synth_res = chat_session.execute_tool(
+        "add_task",
+        {
+            "title": "Boids Simulation Script Development",
+            "tier": "system_2",
+            "prompt": "Write simulation code.",
+            "dependencies": ["Boids Simulation Research"],  # title instead of task_id
+        },
+    )
+    assert synth_res["success"] is True
+    assert synth_res["depends_on"] == [recon_id]
+    assert "resolved_dependencies" in synth_res
+    assert synth_res["resolved_dependencies"][0]["from_title"] == "Boids Simulation Research"
+    assert synth_res["resolved_dependencies"][0]["to_id"] == recon_id
+
+    # Downstream task should be blocked because upstream recon is ready, not completed
+    assert synth_res["status"] == "blocked"
+
+
+def test_activate_and_deactivate_bundle_parameter_aliasing(chat_session: BatonChatSession):
+    """Verify activate/deactivate accept 'tool_bundle' and 'bundle' aliases."""
+    # Activate with tool_bundle
+    act_res = chat_session.execute_tool("activate_tool_bundle", {"tool_bundle": "sandbox"})
+    assert act_res["success"] is True
+    assert "sandbox" in chat_session.active_bundles
+
+    # Deactivate with bundle
+    deact_res = chat_session.execute_tool("deactivate_tool_bundle", {"bundle": "sandbox"})
+    assert deact_res["success"] is True
+    assert "sandbox" not in chat_session.active_bundles
+
+
+def test_start_orchestration_tool_and_slash_commands(chat_session: BatonChatSession):
+    """Verify start_orchestration tool and slash command runner."""
+    # 1. Empty queue returns cleanly
+    empty_res = chat_session.execute_tool("start_orchestration", {"max_steps": 2})
+    assert empty_res["success"] is True
+    assert empty_res["steps_executed"] == 0
+
+    # 2. Add a ready task and execute via start_orchestration
+    t_res = chat_session.execute_tool(
+        "add_task",
+        {
+            "title": "Auto Orchestrate Target",
+            "tier": "system_1",
+            "prompt": "Simple quick task.",
+        },
+    )
+    assert t_res["status"] == "ready"
+
+    # Mock system1 execution so it doesn't need live Ollama
+    chat_session.orchestrator.system1.execute_task = MagicMock(
+        return_value=("Dossier summary text", "dossier.md", 50, 0.5)
+    )
+
+    orch_res = chat_session.execute_tool("start_orchestration", {"max_steps": 3})
+    assert orch_res["success"] is True
+    assert orch_res["steps_executed"] == 1
+    assert orch_res["executed_tasks"][0]["task_id"] == t_res["task_id"]
+    assert orch_res["executed_tasks"][0]["status"] == "completed"
+
+    # 3. Test slash commands /start and /help <tool>
+    assert chat_session.handle_slash_command("/start 1") is True
+    assert chat_session.handle_slash_command("/help add_task") is True
+    assert chat_session.handle_slash_command("/toolhelp start_orchestration") is True
+
 

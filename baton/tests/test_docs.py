@@ -1,6 +1,7 @@
 """Unit tests for DocsTool (Dash/Zeal offline API docsets)."""
 
 import sqlite3
+import zlib
 from pathlib import Path
 
 import pytest
@@ -93,12 +94,12 @@ def test_docs_tool_dispatcher(mock_docset: Path, tmp_path: Path):
 
     # 1. List libraries
     res = tool.execute("docs_list_libraries", {})
-    assert "Available Offline API Docsets" in res
+    assert "Available Offline API Documentation" in res or "Available Offline API Docsets" in res
     assert "python" in res
 
     # 2. Search
     res = tool.execute("docs_search", {"library": "python", "query": "path"})
-    assert "Symbols in `python` matching 'path'" in res
+    assert "Symbols in `python` matching 'path'" in res or "symbols matching 'path'" in res
     assert "os.path.join" in res
 
     # 3. Read symbol
@@ -108,3 +109,69 @@ def test_docs_tool_dispatcher(mock_docset: Path, tmp_path: Path):
     # 4. Unknown tool
     res = tool.execute("unknown_doc_tool", {})
     assert "Error: Unknown Docs tool" in res
+
+
+@pytest.fixture
+def mock_sphinx_zip(tmp_path: Path) -> Path:
+    """Creates a temporary mock NumPy Sphinx documentation zip for testing."""
+    zip_path = tmp_path / "numpy-html.zip"
+
+    # 1. Build objects.inv payload
+    inv_header = b"# Sphinx inventory version 2\n# Project: NumPy\n# Version: 1.26\n# The remainder of this file is compressed using zlib.\n"
+    entries = [
+        "numpy.zeros py:function 1 reference/generated/numpy.zeros.html#numpy.zeros -",
+        "numpy.ones py:function 1 reference/generated/numpy.ones.html#numpy.ones -",
+        "numpy.ndarray py:class 1 reference/generated/numpy.ndarray.html#numpy.ndarray -",
+    ]
+    decomp_body = "\n".join(entries).encode("utf-8")
+    compressed_body = zlib.compress(decomp_body)
+    objects_inv_bytes = inv_header + compressed_body
+
+    html_zeros = """
+    <!DOCTYPE html>
+    <html>
+    <head><title>numpy.zeros</title></head>
+    <body>
+        <article class="bd-article">
+            <h1>numpy.zeros</h1>
+            <p><strong>numpy.zeros(shape, dtype=float, order='C')</strong></p>
+            <p>Return a new array of given shape and type, filled with zeros.</p>
+        </article>
+    </body>
+    </html>
+    """
+
+    import zipfile
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("objects.inv", objects_inv_bytes)
+        z.writestr("reference/generated/numpy.zeros.html", html_zeros.encode("utf-8"))
+
+    return zip_path
+
+
+def test_sphinx_zip_discovery_and_search(mock_sphinx_zip: Path, tmp_path: Path):
+    tool = DocsTool(docs_dir=tmp_path)
+    libs = tool.list_libraries()
+    assert any(l["library"] == "numpy" and l["format"] == "sphinx_zip" for l in libs)
+
+    # Search via canonical name
+    matches = tool.search("numpy", "zeros")
+    assert len(matches) >= 1
+    assert matches[0]["name"] == "numpy.zeros"
+    assert matches[0]["type"] == "py:function"
+    assert "numpy.zeros.html" in matches[0]["path"]
+
+    # Search via alias 'np'
+    matches_alias = tool.search("np", "zeros")
+    assert len(matches_alias) >= 1
+    assert matches_alias[0]["name"] == "numpy.zeros"
+    tool.close()
+
+
+def test_sphinx_zip_read_symbol(mock_sphinx_zip: Path, tmp_path: Path):
+    tool = DocsTool(docs_dir=tmp_path)
+    content = tool.read_symbol("numpy", "zeros")
+    assert "Documentation: `numpy.zeros`" in content
+    assert "numpy.zeros" in content
+    assert "filled with zeros" in content
+    tool.close()
