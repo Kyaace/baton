@@ -121,7 +121,7 @@ def test_tool_shelf_dynamic_activation_and_deactivation(chat_session: BatonChatS
 
     # 2. Inspect shelf tool
     shelf_res = chat_session.execute_tool("list_tool_bundles", {})
-    assert len(shelf_res["shelf"]) == 7  # core, baton, wikipedia, newsboat, sandbox, sdr, time
+    assert len(shelf_res["shelf"]) == 9  # core, baton, wikipedia, newsboat, sandbox, sdr, time, docs, vault
     assert "core" in shelf_res["active_bundles"]
     assert "baton" in shelf_res["active_bundles"]
 
@@ -202,9 +202,9 @@ def test_research_agent_session_isolation(temp_db: Database, tmp_path: Path):
     research_session = BatonChatSession(
         db=temp_db,
         orchestrator=orch,
-        initial_bundles={"core", "wikipedia"},
+        initial_bundles={"core", "library"},
     )
-    assert research_session.active_bundles == {"core", "wikipedia"}
+    assert research_session.active_bundles == {"core", "library"}
     schema = research_session.get_active_tools_schema()
     names = {t["function"]["name"] for t in schema}
 
@@ -220,6 +220,14 @@ def test_research_agent_session_isolation(temp_db: Database, tmp_path: Path):
     assert "queue_status" not in names
     assert "step_queue" not in names
     assert "list_tasks" not in names
+
+    # Backwards compatibility: initial_bundles with 'wikipedia' resolves to 'library'
+    legacy_session = BatonChatSession(
+        db=temp_db,
+        orchestrator=orch,
+        initial_bundles={"core", "wikipedia"},
+    )
+    assert legacy_session.active_bundles == {"core", "library"}
 
 
 def test_execute_tool_add_list_and_get_task(chat_session: BatonChatSession):
@@ -533,4 +541,28 @@ def test_chat_session_logging(temp_db: Database, tmp_path: Path):
         assert "Hello! I am ready to assist" in text
         assert "[TELEMETRY]" in text
         assert "eval_tokens" in text or "eval_count" in text
+
+
+def test_library_bundle_activation_and_dynamic_mounted_corpora(chat_session: BatonChatSession):
+    """Verify activating 'library' (or legacy 'wikipedia') returns mounted corpora and dynamic metadata."""
+    # 1. Activate via legacy name 'wikipedia'
+    res = chat_session.execute_tool("activate_tool_bundle", {"bundle_name": "wikipedia"})
+    assert res["success"] is True
+    assert res["activated_bundle"] == "library"
+    assert "library" in chat_session.active_bundles
+    assert "mounted_corpora" in res
+    assert isinstance(res["mounted_corpora"], list)
+    assert "default_corpus" in res
+
+    # 2. Deactivate via 'library'
+    deact = chat_session.execute_tool("deactivate_tool_bundle", {"bundle_name": "library"})
+    assert deact["success"] is True
+    assert "library" not in chat_session.active_bundles
+
+    # 3. Activate via 'library'
+    res2 = chat_session.execute_tool("activate_tool_bundle", {"bundle_name": "library"})
+    assert res2["success"] is True
+    assert res2["activated_bundle"] == "library"
+    assert "library" in chat_session.active_bundles
+    assert "mounted_corpora" in res2
 

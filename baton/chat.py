@@ -35,10 +35,12 @@ from baton.db import Database
 from baton.engine_manager import EngineManager
 from baton.models import Task, TaskStatus, Tier
 from baton.orchestrator import Orchestrator
+from baton.tools.docs_tool import DocsTool
 from baton.tools.newsboat import NewsboatTool
 from baton.tools.sandbox import SandboxTool
 from baton.tools.sdr import SdrTool
 from baton.tools.time_tool import TimeTool
+from baton.tools.vault import VaultTool
 from baton.tools.zim import ZimTool
 
 logger = logging.getLogger("baton.chat")
@@ -73,8 +75,8 @@ SHELF_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "properties": {
                     "bundle_name": {
                         "type": "string",
-                        "enum": ["baton", "wikipedia", "newsboat", "sandbox", "sdr", "time"],
-                        "description": "Name of the tool bundle to activate ('baton', 'wikipedia', 'newsboat', 'sandbox', 'sdr', or 'time').",
+                        "enum": ["baton", "library", "newsboat", "sandbox", "sdr", "time", "docs", "vault", "wikipedia"],
+                        "description": "Name of the tool bundle to activate ('baton', 'library', 'newsboat', 'sandbox', 'sdr', 'time', 'docs', or 'vault').",
                     },
                 },
                 "required": ["bundle_name"],
@@ -91,8 +93,8 @@ SHELF_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "properties": {
                     "bundle_name": {
                         "type": "string",
-                        "enum": ["baton", "wikipedia", "newsboat", "sandbox", "sdr", "time"],
-                        "description": "Name of the tool bundle to deactivate ('baton', 'wikipedia', 'newsboat', 'sandbox', 'sdr', or 'time').",
+                        "enum": ["baton", "library", "newsboat", "sandbox", "sdr", "time", "docs", "vault", "wikipedia"],
+                        "description": "Name of the tool bundle to deactivate ('baton', 'library', 'newsboat', 'sandbox', 'sdr', 'time', 'docs', or 'vault').",
                     },
                 },
                 "required": ["bundle_name"],
@@ -307,14 +309,29 @@ WIKIPEDIA_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "zim_list_corpora",
+            "description": "Lists all currently mounted and discovered offline .zim archives on disk with their active corpus aliases, filenames, and sizes. Always call this tool to see what archives are available before querying.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "wiki_search",
-            "description": "Searches the offline Kiwix Wikipedia ZIM database for articles matching a query.",
+            "description": "Searches mounted offline .zim archives for articles/documentation matching a query. Supports targeting a specific mounted corpus via 'corpus' (e.g. 'wikipedia', 'wikimed', 'python') or across all mounted archives via corpus='all'.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
                         "description": "Search query terms.",
+                    },
+                    "corpus": {
+                        "type": "string",
+                        "description": "Target corpus alias from zim_list_corpora (e.g. 'wikipedia', 'wikimed', 'python', or 'all').",
                     },
                     "limit": {
                         "type": "integer",
@@ -907,12 +924,200 @@ TIME_TOOLS_SCHEMA: list[dict[str, Any]] = [
     },
 ]
 
+# -----------------------------------------------------------------------------
+# 8. Offline API Documentation Schema ('docs' bundle)
+# -----------------------------------------------------------------------------
+
+DOCS_TOOLS_SCHEMA: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "docs_list_libraries",
+            "description": "Lists available offline API docsets (Dash/Zeal format) with total indexed symbol counts.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "docs_search",
+            "description": "Searches offline API docset symbols (e.g. classes, functions, methods, modules).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "library": {
+                        "type": "string",
+                        "description": "Library name (e.g. 'python', 'pydantic', 'numpy', 'scipy', 'textual').",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Symbol name or search query.",
+                    },
+                    "symbol_type": {
+                        "type": "string",
+                        "description": "Optional symbol type filter (e.g. 'Class', 'Function', 'Method', 'Module').",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default 10).",
+                    },
+                },
+                "required": ["library", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "docs_read_symbol",
+            "description": "Extracts clean Markdown documentation and code signatures for a specific symbol or document path in an offline docset.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "library": {
+                        "type": "string",
+                        "description": "Library name.",
+                    },
+                    "symbol_or_path": {
+                        "type": "string",
+                        "description": "Exact symbol name or document path.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters of documentation to extract (default 3500).",
+                    },
+                },
+                "required": ["library", "symbol_or_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "docs_get_signature",
+            "description": "Extracts the exact code signature and docstring summary for a library symbol.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "library": {
+                        "type": "string",
+                        "description": "Library name.",
+                    },
+                    "symbol_name": {
+                        "type": "string",
+                        "description": "Symbol name.",
+                    },
+                },
+                "required": ["library", "symbol_name"],
+            },
+        },
+    },
+]
+
+# -----------------------------------------------------------------------------
+# 9. Personal Notes & Corpus Vault Schema ('vault' bundle)
+# -----------------------------------------------------------------------------
+
+VAULT_TOOLS_SCHEMA: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "vault_search",
+            "description": "Executes high-speed BM25 ranked full-text search across local personal notes, markdown files, and past artifacts using SQLite FTS5.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query terms or phrases.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional category filter (e.g. 'notes', 'docs', 'specs', 'code').",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default 5).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vault_read_document",
+            "description": "Reads the full or budgeted content of a local document from the vault by document ID or path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_id_or_path": {
+                        "type": "string",
+                        "description": "Numeric document ID from vault_search or path substring.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to retrieve (default 3500).",
+                    },
+                },
+                "required": ["doc_id_or_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vault_index_path",
+            "description": "Recursively scans and indexes local markdown, text, or documentation files into the SQLite FTS5 vault.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory or file path to index.",
+                    },
+                    "glob_pattern": {
+                        "type": "string",
+                        "description": "File glob pattern (default: '*.md').",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional category label (e.g. 'notes', 'specs', 'research').",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vault_status",
+            "description": "Returns index statistics: document count, total indexed words, and category breakdown.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+]
+
 # Backward compatibility alias
 CORE_TOOLS_SCHEMA = SHELF_TOOLS_SCHEMA
 
 # -----------------------------------------------------------------------------
 # Tool Shelf Registry
 # -----------------------------------------------------------------------------
+
+BUNDLE_ALIASES: dict[str, str] = {
+    "wikipedia": "library",
+    "wiki": "library",
+    "zim": "library",
+}
 
 TOOL_BUNDLES: dict[str, dict[str, Any]] = {
     "core": {
@@ -929,10 +1134,10 @@ TOOL_BUNDLES: dict[str, dict[str, Any]] = {
         "tools": BATON_QUEUE_TOOLS_SCHEMA,
         "always_active": False,
     },
-    "wikipedia": {
-        "name": "wikipedia",
-        "title": "Kiwix Wikipedia ZIM Reader",
-        "description": "Offline encyclopedic search, article sections, leads, table of contents, and infobox constants.",
+    "library": {
+        "name": "library",
+        "title": "Offline ZIM Archive Explorer & Multi-Corpus Reader",
+        "description": "Offline Kiwix .zim archive explorer and reader. Dynamically searches and reads across any locally mounted .zim files on disk (Wikipedia, Python docs, WikiMed, etc.).",
         "tools": WIKIPEDIA_TOOLS_SCHEMA,
         "always_active": False,
     },
@@ -964,6 +1169,20 @@ TOOL_BUNDLES: dict[str, dict[str, Any]] = {
         "tools": TIME_TOOLS_SCHEMA,
         "always_active": False,
     },
+    "docs": {
+        "name": "docs",
+        "title": "Offline API & Technical Documentation (Dash/Zeal)",
+        "description": "Offline symbol lookup, exact API method signatures, and HTML-to-markdown documentation extraction using local .docset folders.",
+        "tools": DOCS_TOOLS_SCHEMA,
+        "always_active": False,
+    },
+    "vault": {
+        "name": "vault",
+        "title": "Personal Knowledge & Local Notes Vault (SQLite FTS5)",
+        "description": "High-speed BM25 ranked full-text search and incremental indexing across local markdown notes, past project artifacts, and documentation.",
+        "tools": VAULT_TOOLS_SCHEMA,
+        "always_active": False,
+    },
 }
 
 # Full combined schema list for backwards compatibility
@@ -975,6 +1194,8 @@ BATON_TOOLS_SCHEMA: list[dict[str, Any]] = (
     + SANDBOX_TOOLS_SCHEMA
     + SDR_TOOLS_SCHEMA
     + TIME_TOOLS_SCHEMA
+    + DOCS_TOOLS_SCHEMA
+    + VAULT_TOOLS_SCHEMA
 )
 
 # -----------------------------------------------------------------------------
@@ -992,13 +1213,15 @@ TOOL SHELF ARCHITECTURE:
 To prevent context window bloat and tool distraction, tools are organized into modular bundles on a 'shelf':
 - 'core' (ACTIVE): Baseline shelf controls (list_tool_bundles, activate_tool_bundle, deactivate_tool_bundle).
 - 'baton' (ON SHELF / ACTIVE in Chat): Baton queue management, task creation (add_task), queue stepping, and artifact review.
-- 'wikipedia' (ON SHELF): Offline Kiwix ZIM Wikipedia lookups (search, read sections/infoboxes).
+- 'library' (ON SHELF): Offline Kiwix ZIM archive explorer and reader. Inspects, searches, and reads from any locally mounted .zim files on disk (general knowledge, Python documentation, medical references, etc.).
 - 'newsboat' (ON SHELF): Offline RSS news monitoring across 12+ tech/science feeds (Ars Technica, Nature, NASA, MIT Tech Review, Krebs, etc.).
 - 'sandbox' (ON SHELF): Isolated Python execution, AST syntax verification, and pytest test suite runner.
 - 'sdr' (ON SHELF): RTL-SDR RF spectrum analysis, carrier detection, audio recording, and telemetry decoding.
 - 'time' (ON SHELF): Real-world UTC and local system time, timezone grounding, and task alarm scheduling (deferring or waking up tasks in the future).
+- 'docs' (ON SHELF): Offline API and technical documentation (Dash/Zeal .docset archives) for exact method signatures, classes, and docstrings.
+- 'vault' (ON SHELF): Personal local notes and project artifact search powered by SQLite FTS5 with BM25 ranking.
 
-If you need capabilities from an inactive bundle on the shelf, call `activate_tool_bundle(bundle_name="baton" | "wikipedia" | "newsboat" | "sandbox" | "sdr" | "time")`.
+If you need capabilities from an inactive bundle on the shelf, call `activate_tool_bundle(bundle_name="baton" | "library" | "newsboat" | "sandbox" | "sdr" | "time" | "docs" | "vault")`.
 Once activated, those tools immediately become available on your toolbelt for subsequent tool calls.
 You can return a bundle to the shelf when finished using `deactivate_tool_bundle(bundle_name=...)` to free context tokens.
 
@@ -1032,6 +1255,8 @@ class BatonChatSession:
         sandbox_tool: Optional[SandboxTool] = None,
         sdr_tool: Optional[SdrTool] = None,
         time_tool: Optional[TimeTool] = None,
+        docs_tool: Optional[DocsTool] = None,
+        vault_tool: Optional[VaultTool] = None,
         engine_mgr: Optional[EngineManager] = None,
         model_name: Optional[str] = None,
         ollama_url: Optional[str] = None,
@@ -1046,6 +1271,8 @@ class BatonChatSession:
         self._sandbox_tool = sandbox_tool
         self._sdr_tool = sdr_tool
         self._time_tool = time_tool
+        self._docs_tool = docs_tool
+        self._vault_tool = vault_tool
         self.ollama_url = (
             ollama_url
             or getattr(self.engine_mgr, "ollama_url", None)
@@ -1058,10 +1285,11 @@ class BatonChatSession:
             or "qwen3:14b"
         )
         # Baton Chat has access to 'core' and 'baton' bundles by default.
-        # Research agents can pass initial_bundles={'core', 'wikipedia'} to exclude queue tools.
-        self.active_bundles: set[str] = (
-            set(initial_bundles) if initial_bundles is not None else {"core", "baton"}
-        )
+        # Research agents can pass initial_bundles={'core', 'library'} to exclude queue tools.
+        if initial_bundles is not None:
+            self.active_bundles: set[str] = {BUNDLE_ALIASES.get(b.lower().strip(), b.lower().strip()) for b in initial_bundles}
+        else:
+            self.active_bundles = {"core", "baton"}
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_COPILOT_PROMPT}
         ]
@@ -1162,6 +1390,26 @@ class BatonChatSession:
                 self._time_tool = None  # type: ignore[assignment]
         return self._time_tool
 
+    @property
+    def docs_tool(self) -> DocsTool:
+        if self._docs_tool is None:
+            try:
+                self._docs_tool = DocsTool()
+            except Exception as e:
+                logger.warning("Could not initialize DocsTool: %s", e)
+                self._docs_tool = None  # type: ignore[assignment]
+        return self._docs_tool
+
+    @property
+    def vault_tool(self) -> VaultTool:
+        if self._vault_tool is None:
+            try:
+                self._vault_tool = VaultTool()
+            except Exception as e:
+                logger.warning("Could not initialize VaultTool: %s", e)
+                self._vault_tool = None  # type: ignore[assignment]
+        return self._vault_tool
+
     def get_active_tools_schema(self) -> list[dict[str, Any]]:
         """Compiles the list of JSON tool schemas strictly for currently active bundles."""
         tools: list[dict[str, Any]] = []
@@ -1188,32 +1436,72 @@ class BatonChatSession:
                     if b_info.get("always_active"):
                         status_str += " [Required]"
                     tool_names = [t["function"]["name"] for t in b_info["tools"]]
+                    desc = b_info["description"]
+                    if b_name == "library" and self.zim_tool:
+                        corpora_list = self.zim_tool.list_corpora()
+                        corpora_summary = ", ".join(c["corpus"] for c in corpora_list) or "none"
+                        desc = f"Offline Kiwix .zim archive explorer ({len(corpora_list)} corpora currently mounted: {corpora_summary})."
                     shelf_items.append({
                         "bundle": b_name,
                         "title": b_info["title"],
                         "status": status_str,
-                        "description": b_info["description"],
+                        "description": desc,
                         "tools": tool_names,
                     })
                 return {"shelf": shelf_items, "active_bundles": list(self.active_bundles)}
 
             elif name == "activate_tool_bundle":
-                bundle_name = args["bundle_name"].lower().strip()
+                raw_name = args["bundle_name"].lower().strip()
+                bundle_name = BUNDLE_ALIASES.get(raw_name, raw_name)
                 if bundle_name not in TOOL_BUNDLES:
                     return {
-                        "error": f"Unknown bundle '{bundle_name}'. Available bundles: {list(TOOL_BUNDLES.keys())}"
+                        "error": f"Unknown bundle '{raw_name}'. Available bundles: {list(TOOL_BUNDLES.keys())}"
                     }
                 self.active_bundles.add(bundle_name)
                 activated_tools = [t["function"]["name"] for t in TOOL_BUNDLES[bundle_name]["tools"]]
-                return {
+                res: dict[str, Any] = {
                     "success": True,
                     "activated_bundle": bundle_name,
                     "message": f"Bundle '{bundle_name}' has been activated on your toolbelt.",
                     "available_tools": activated_tools,
                 }
 
+                # Dynamic status and discovered elements for active bundles
+                if bundle_name == "library" and self.zim_tool:
+                    corpora = [c["corpus"] for c in self.zim_tool.list_corpora()]
+                    res["mounted_corpora"] = corpora
+                    res["default_corpus"] = getattr(self.zim_tool, "default_corpus", "wikipedia")
+                    res["corpora_count"] = len(corpora)
+                elif bundle_name == "docs" and self.docs_tool:
+                    libs = [l["library"] for l in self.docs_tool.list_libraries()]
+                    res["available_libraries"] = libs
+                    res["libraries_count"] = len(libs)
+                elif bundle_name == "newsboat" and self.newsboat_tool:
+                    feeds = [f["title"] for f in self.newsboat_tool.list_feeds()]
+                    res["subscribed_feeds"] = feeds
+                    res["feeds_count"] = len(feeds)
+                elif bundle_name == "vault" and self.vault_tool:
+                    st = self.vault_tool.get_status()
+                    res["total_documents"] = st.get("documents_count", 0)
+                    res["categories"] = list(st.get("categories", {}).keys())
+                elif bundle_name == "time" and self.time_tool:
+                    t_info = self.time_tool.get_current_time()
+                    res["current_time"] = t_info.get("local_human", "")
+                    res["timezone"] = t_info.get("timezone", "")
+                elif bundle_name == "sdr" and self.sdr_tool:
+                    dev = self.sdr_tool.get_device_info()
+                    res["hardware_status"] = dev.get("status", "unknown")
+                    res["tuner"] = dev.get("tuner", "none")
+                elif bundle_name == "baton":
+                    tasks = self.db.get_all_tasks()
+                    res["total_tasks"] = len(tasks)
+                    res["ready_tasks"] = len([t for t in tasks if t.status.value == "ready"])
+
+                return res
+
             elif name == "deactivate_tool_bundle":
-                bundle_name = args["bundle_name"].lower().strip()
+                raw_name = args["bundle_name"].lower().strip()
+                bundle_name = BUNDLE_ALIASES.get(raw_name, raw_name)
                 if bundle_name == "core":
                     return {"error": "Cannot deactivate the 'core' bundle."}
                 if bundle_name in self.active_bundles:
@@ -1566,6 +1854,34 @@ class BatonChatSession:
                     return {"error": "TimeTool is not available."}
                 return {"result": self.time_tool.execute(name, args)}
 
+            # Docs Bundle Tools ('docs')
+            elif name in (
+                "docs_list_libraries",
+                "docs_search",
+                "docs_read_symbol",
+                "docs_get_signature",
+            ):
+                if not self.docs_tool:
+                    return {"error": "DocsTool is not available."}
+                return {"result": self.docs_tool.execute(name, args)}
+
+            # Vault Bundle Tools ('vault')
+            elif name in (
+                "vault_search",
+                "vault_read_document",
+                "vault_index_path",
+                "vault_status",
+            ):
+                if not self.vault_tool:
+                    return {"error": "VaultTool is not available."}
+                return {"result": self.vault_tool.execute(name, args)}
+
+            # Multi-ZIM Corpora listing
+            elif name in ("zim_list_corpora", "list_corpora"):
+                if not self.zim_tool:
+                    return {"error": "ZimTool is not available."}
+                return {"result": self.zim_tool.execute(name, args)}
+
             else:
                 return {"error": f"Unknown tool name: '{name}'"}
 
@@ -1728,7 +2044,8 @@ class BatonChatSession:
             return True
 
         elif cmd == "/bundle":
-            target = arg.strip().lower()
+            raw_target = arg.strip().lower()
+            target = BUNDLE_ALIASES.get(raw_target, raw_target)
             if not target:
                 self.print_shelf()
             elif target == "all":
@@ -1748,7 +2065,7 @@ class BatonChatSession:
                     self.active_bundles.add(target)
                     console.print(f"[green]Activated bundle '{target}' from shelf.[/]")
             else:
-                console.print(f"[red]Unknown bundle '{target}'. Available: {list(TOOL_BUNDLES.keys())}[/]")
+                console.print(f"[red]Unknown bundle '{raw_target}'. Available: {list(TOOL_BUNDLES.keys())}[/]")
             return True
 
         elif cmd in ("/tasks", "/queue"):
@@ -1826,6 +2143,37 @@ class BatonChatSession:
                 console.print("[red]TimeTool is not available.[/]")
             return True
 
+        elif cmd == "/docs":
+            if not self.docs_tool:
+                console.print("[red]DocsTool is not available.[/]")
+            elif not rest:
+                console.print(Markdown(self.docs_tool.format_libraries_markdown()))
+            else:
+                parts = rest.split(maxsplit=1)
+                lib = parts[0]
+                q = parts[1] if len(parts) > 1 else ""
+                if not q:
+                    console.print(f"[yellow]Usage: /docs <library> <query>[/]")
+                else:
+                    console.print(Markdown(self.docs_tool.format_search_markdown(library=lib, query=q)))
+            return True
+
+        elif cmd == "/vault":
+            if not self.vault_tool:
+                console.print("[red]VaultTool is not available.[/]")
+            elif not rest:
+                console.print(Markdown(self.vault_tool.format_status_markdown()))
+            else:
+                console.print(Markdown(self.vault_tool.format_search_markdown(query=rest)))
+            return True
+
+        elif cmd in ("/corpora", "/zim"):
+            if not self.zim_tool:
+                console.print("[red]ZimTool is not available.[/]")
+            else:
+                console.print(Markdown(self.zim_tool.format_corpora_markdown()))
+            return True
+
         return False
 
     # -------------------------------------------------------------------------
@@ -1837,7 +2185,7 @@ class BatonChatSession:
         console.print(
             Panel.fit(
                 f"[bold cyan]🏏 Baton System 1 Copilot[/] [dim]({self.model_name})[/]\n"
-                "[dim]Zero-lag conversational task planner, offline news & Wikipedia scout.[/]\n"
+                "[dim]Zero-lag conversational task planner, offline knowledge library & news scout.[/]\n"
                 f"[dim]Active Toolbelt:[/] [bold green]{active_str}[/]  |  [dim]Shelf:[/] [yellow]/shelf[/], [yellow]/bundle <name>[/]\n"
                 f"[dim]Live Session Log:[/] [bold cyan]{self.latest_log_path}[/] [dim]({self.session_log_path.name})[/]\n"
                 "[dim]Commands:[/] [bold yellow]/tasks[/], [bold yellow]/status[/], [bold yellow]/artifacts[/], [bold yellow]/step[/], [bold yellow]/help[/], [bold yellow]/exit[/]",
@@ -1868,7 +2216,7 @@ class BatonChatSession:
         table.add_column("Command / Capability", style="cyan")
         table.add_column("Description", style="white")
         table.add_row("/shelf or /bundles", "Inspect tool shelf and active toolbelt bundles")
-        table.add_row("/bundle <name>", "Activate/deactivate bundle (e.g. /bundle baton, /bundle sandbox, /bundle newsboat, /bundle wikipedia, /bundle all)")
+        table.add_row("/bundle <name>", "Activate/deactivate bundle (e.g. /bundle baton, /bundle library, /bundle sandbox, /bundle newsboat, /bundle docs, /bundle vault, /bundle all)")
         table.add_row("/tasks [status]", "Instantly view task table (filter by ready, blocked, completed, failed)")
         table.add_row("/status", "Show engine statuses (Ollama, Colibrì) and queue counts")
         table.add_row("/artifacts", "List generated briefing dossiers and synthesis artifacts")
@@ -1879,9 +2227,12 @@ class BatonChatSession:
         table.add_row("/telemetry [preset]", "Listen for sensor telemetry (us_smart_meters, us_tpms, eu_sensors)")
         table.add_row("/time", "Display current system time (local & UTC)")
         table.add_row("/alarms", "List scheduled task alarms and countdowns")
+        table.add_row("/corpora or /zim", "List all mounted offline ZIM archives and loaded corpora")
+        table.add_row("/docs [library] [query]", "Search offline API documentation (Dash/Zeal docsets)")
+        table.add_row("/vault [query]", "Search personal notes & local corpus vault (SQLite FTS5)")
         table.add_row("/clear", "Clear terminal screen")
         table.add_row("/exit or /quit", "Leave chat mode")
-        table.add_row("[dim]Autonomous Shelf[/]", "[dim]Agent automatically calls activate_tool_bundle('baton'|'sandbox'|'newsboat'|'wikipedia'|'sdr'|'time') on demand.[/]")
+        table.add_row("[dim]Autonomous Shelf[/]", "[dim]Agent automatically calls activate_tool_bundle('baton'|'library'|'sandbox'|'newsboat'|'sdr'|'time'|'docs'|'vault') on demand.[/]")
         console.print(table)
 
     def print_task_table(self, filter_status: str = "") -> None:

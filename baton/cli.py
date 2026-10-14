@@ -120,8 +120,8 @@ def main() -> None:
         if args.bundles:
             initial_bundles = set(args.bundles)
         elif args.research:
-            # Dedicated research mode: load shelf, Wikipedia, and Newsboat without Baton queue tools
-            initial_bundles = {"core", "wikipedia", "newsboat"}
+            # Dedicated research mode: load shelf, library (Wikipedia + ZIM archives), and newsboat without Baton queue tools
+            initial_bundles = {"core", "library", "newsboat"}
 
         chat_session = BatonChatSession(
             orchestrator=orchestrator,

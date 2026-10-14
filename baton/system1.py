@@ -284,6 +284,9 @@ class System1Runner:
         self._newsboat_tool = newsboat_tool
         self._sandbox_tool = sandbox_tool
         self._sdr_tool = sdr_tool
+        self._time_tool: Any = None
+        self._docs_tool: Any = None
+        self._vault_tool: Any = None
         self.max_repair_retries = max_repair_retries
         self.structured_output = structured_output
         self._cancel_requested = False
@@ -324,6 +327,27 @@ class System1Runner:
             from baton.tools.sdr import SdrTool
             self._sdr_tool = SdrTool()
         return self._sdr_tool
+
+    @property
+    def time_tool(self) -> Any:
+        if self._time_tool is None:
+            from baton.tools.time_tool import TimeTool
+            self._time_tool = TimeTool()
+        return self._time_tool
+
+    @property
+    def docs_tool(self) -> Any:
+        if self._docs_tool is None:
+            from baton.tools.docs_tool import DocsTool
+            self._docs_tool = DocsTool()
+        return self._docs_tool
+
+    @property
+    def vault_tool(self) -> Any:
+        if self._vault_tool is None:
+            from baton.tools.vault import VaultTool
+            self._vault_tool = VaultTool()
+        return self._vault_tool
 
     def generate(
         self,
@@ -497,6 +521,15 @@ class System1Runner:
                 raw_tool_data = self.sandbox_tool.execute(task.tool_name, params)
             elif tool_lower.startswith("sdr_") or tool_lower.startswith("rtl_"):
                 raw_tool_data = self.sdr_tool.execute(task.tool_name, params)
+            elif (
+                tool_lower.startswith("time_")
+                or tool_lower in ("get_current_time", "schedule_task_alarm", "create_scheduled_task", "list_alarms", "cancel_alarm")
+            ):
+                raw_tool_data = self.time_tool.execute(task.tool_name, params)
+            elif tool_lower.startswith("doc_") or tool_lower.startswith("docs_"):
+                raw_tool_data = self.docs_tool.execute(task.tool_name, params)
+            elif tool_lower.startswith("vault_") or tool_lower in ("search_vault", "vault"):
+                raw_tool_data = self.vault_tool.execute(task.tool_name, params)
             else:
                 raw_tool_data = self.zim_tool.execute(task.tool_name, params)
         elif is_verify and upstream_dossiers:

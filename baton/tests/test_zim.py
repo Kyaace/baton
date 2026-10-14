@@ -74,3 +74,35 @@ def test_zim_tool_dispatcher():
     # Unknown tool
     res = tool.execute("unknown_tool", {})
     assert "Error: Unknown Zim tool" in res
+
+
+def test_multi_zim_corpus_routing():
+    mock_wiki = MagicMock()
+    mock_wiki.search.return_value = [{"title": "Python (programming language)", "snippet": "A high-level language"}]
+    mock_so = MagicMock()
+    mock_so.search.return_value = [{"title": "How to iterate over dict in Python", "snippet": "Use dict.items()"}]
+
+    tool = ZimTool(zim_path="wikipedia_en_all.zim")
+    tool._corpora = {
+        "wikipedia": Path("wikipedia_en_all.zim"),
+        "stackoverflow": Path("stackoverflow.com_en_all.zim"),
+    }
+    tool._readers["wikipedia"] = mock_wiki
+    tool._readers["stackoverflow"] = mock_so
+
+    # 1. Test listing corpora
+    corpora_md = tool.execute("zim_list_corpora", {})
+    assert "Mounted Offline ZIM Corpora" in corpora_md
+    assert "wikipedia" in corpora_md
+    assert "stackoverflow" in corpora_md
+
+    # 2. Test targeted corpus search
+    so_res = tool.execute("zim_search", {"query": "iterate dict", "corpus": "stackoverflow"})
+    assert "Found 1 matches in [stackoverflow]" in so_res
+    assert "How to iterate over dict" in so_res
+
+    # 3. Test cross-corpus search (corpus="all")
+    all_res = tool.execute("zim_search", {"query": "Python", "corpus": "all"})
+    assert "matches across corpora" in all_res
+    assert "[wikipedia]" in all_res
+    assert "[stackoverflow]" in all_res

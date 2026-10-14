@@ -46,6 +46,61 @@ def check_degenerate_repetition(text: str, min_chars: int = 60) -> bool:
     return False
 
 
+def sanitize_continuation_seam(prior: str, new_chunk: str, max_overlap: int = 80) -> str:
+    """Stitches new_chunk onto prior content across a model continuation boundary.
+
+    Resolves:
+    1. Token stutter / overlapping prefix/suffix: If new_chunk repeats the tail of prior,
+       the duplicate prefix in new_chunk is stripped.
+    2. Missing newline between distinct statement boundaries: E.g. if prior ends with
+       a complete statement and new_chunk begins with a top-level or indented statement
+       without a newline.
+    """
+    if not prior:
+        return new_chunk
+    if not new_chunk:
+        return ""
+
+    cleaned_new = new_chunk
+
+    # 1. Check for overlapping prefix/suffix (longest match first down to 1)
+    max_search = min(len(prior), len(cleaned_new), max_overlap)
+    best_overlap = 0
+    for k in range(max_search, 0, -1):
+        suffix = prior[-k:]
+        prefix = cleaned_new[:k]
+        if suffix == prefix:
+            best_overlap = k
+            break
+
+    if best_overlap > 0:
+        cleaned_new = cleaned_new[best_overlap:]
+
+    # 2. Check for missing newline between statements
+    # If prior ends without newline and cleaned_new starts without newline,
+    # and prior ends with statement terminus (colon, closing paren, bracket, quote, semicolon, return/pass/break/continue)
+    # and cleaned_new starts with a new statement keyword or assignment
+    if prior and cleaned_new:
+        prior_tail = prior.rstrip(" \t")
+        if (
+            not prior.endswith("\n")
+            and not cleaned_new.startswith("\n")
+            and prior_tail
+            and (
+                prior_tail[-1] in (":", ")", "]", "}", '"', "'", ";")
+                or re.search(r"\b(return|pass|break|continue)(\s+[^\n]+)?$", prior_tail)
+            )
+            and re.match(
+                r"^\s*(def |class |return |import |from |if |elif |else:|for |while |try:|except |finally:|with |@|[a-zA-Z_][a-zA-Z0-9_]*\s*=)",
+                cleaned_new,
+            )
+        ):
+            cleaned_new = "\n" + cleaned_new
+
+    return cleaned_new
+
+
+
 STATIC_SYNTHESIS_SYSTEM_PROMPT = (
     "You are Baton System 2: Deep Synthesizer & Principal Engineer.\n"
     "You write complete, production-grade, mathematically rigorous implementations and specifications.\n"
@@ -542,8 +597,11 @@ class System2Runner:
                 logger.warning("Continuation turn produced no additional tokens. Ending continuation loop.")
                 break
 
-            output_code += new_content
+            sanitized_new = sanitize_continuation_seam(output_code, new_content)
+            output_code += sanitized_new
             total_tokens += new_tokens
+            if progress:
+                progress.content_text = output_code
             if new_reasoning:
                 reasoning = (reasoning + "\n" + new_reasoning).strip() if reasoning else new_reasoning
 
