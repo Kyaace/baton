@@ -283,3 +283,144 @@ def test_orchestrator_wait_for_scheduled(orchestrator: Orchestrator, temp_db: Da
     completed = orchestrator.run_all(max_steps=5, wait_for_scheduled=True, max_wait_seconds=2.0)
     assert len(completed) == 1
     assert completed[0].title == "Immediate Scheduled Task"
+
+
+# =============================================================================
+# 6. Ephemeral Notes, Guardrails & Mercy Rule
+# =============================================================================
+
+def test_ephemeral_notes_crud_and_append(time_tool: TimeTool, temp_db: Database):
+    # Create note
+    res_create = time_tool.save_note(
+        title="Boids Simulation Plan",
+        content="Phase 1: Recon flocking formulas from wiki.",
+    )
+    assert "Ephemeral Note Created:" in res_create
+    assert "Boids Simulation Plan" in res_create
+
+    # Active notes list in DB
+    active = temp_db.get_active_notes()
+    assert len(active) == 1
+    note = active[0]
+    assert note.title == "Boids Simulation Plan"
+    assert "Phase 1" in note.content
+
+    # Append note
+    res_append = time_tool.append_note(
+        note_id=note.id,
+        text="Phase 2: Implement 20-boid script in 100x100 space.",
+    )
+    assert f"Ephemeral Note `#{note.id}` Appended:" in res_append
+    assert "TTL Reset To:" in res_append
+
+    # Verify append-only content
+    read_res = time_tool.read_note(note.id)
+    assert "Phase 1: Recon flocking formulas" in read_res
+    assert "Phase 2: Implement 20-boid script" in read_res
+
+    # Keepalive note
+    res_keepalive = time_tool.keepalive_note(note.id, ttl_hours=12.0)
+    assert f"Ephemeral Note `#{note.id}` Kept Alive:" in res_keepalive
+
+    # Dismiss note
+    res_dismiss = time_tool.dismiss_note(note.id)
+    assert f"Ephemeral note `#{note.id}` dismissed" in res_dismiss
+    assert len(temp_db.get_active_notes()) == 0
+
+
+def test_mercy_one_hour_rule(temp_db: Database, time_tool: TimeTool):
+    # Create note expiring in 30 minutes (< 1 hour remaining)
+    note = temp_db.create_note(title="Expiring Soon", content="Don't lose this thought", ttl_hours=0.5)
+    now = datetime.now()
+    initial_expiry = note.expires_at
+    assert (initial_expiry - now).total_seconds() < 2000
+
+    # Reading note triggers Mercy 1-Hour Rule
+    read_out = time_tool.read_note(note.id)
+    assert "Expiring Soon" in read_out
+
+    # Expiry should now be pushed out to ~1 hour from now
+    updated_note = temp_db.get_note(note.id, apply_mercy_hour=False)
+    assert updated_note is not None
+    assert updated_note.expires_at > initial_expiry
+    assert (updated_note.expires_at - datetime.now()).total_seconds() >= 3500
+
+
+def test_character_cap_guardrails(time_tool: TimeTool):
+    # Test creation exceeding MAX_NOTE_CHARS (3000)
+    huge_content = "x" * 3001
+    res_err = time_tool.save_note(title="Too Long", content=huge_content)
+    assert "Error: Note content length" in res_err
+    assert "exceeds the 3000-character scratchpad limit" in res_err
+    assert "Vault" in res_err or "artifact" in res_err
+
+    # Create note within limit
+    res_ok = time_tool.save_note(title="Valid Note", content="Initial note content")
+    assert "Ephemeral Note Created" in res_ok
+
+    # Test append exceeding MAX_APPEND_CHARS (1500)
+    huge_append = "y" * 1501
+    res_append_err = time_tool.append_note(note_id=1, text=huge_append)
+    assert "Error: Appended text length" in res_append_err
+    assert "exceeds the 1500-character limit" in res_append_err
+
+    # Test cumulative append exceeding MAX_NOTE_CHARS (3000)
+    res_ok_note = time_tool.save_note(title="Large Note", content="a" * 2000)
+    assert "Ephemeral Note Created" in res_ok_note
+    res_cum_err = time_tool.append_note(note_id=2, text="b" * 1100)
+    assert "exceeding the 3000-character scratchpad limit" in res_cum_err
+
+
+def test_alarm_linking_with_note(time_tool: TimeTool, temp_db: Database):
+    # Create note
+    note = temp_db.create_note(title="Alarm Context Note", content="Reminder: verify telemetry packet structure.")
+
+    # Create scheduled task linked to note
+    create_res = time_tool.create_scheduled_task(
+        title="Check Packet Task",
+        when="2h",
+        note_id=note.id,
+    )
+    assert "New Scheduled Task Created" in create_res
+    assert f"`#{note.id}`" in create_res
+
+    # Check task in database has note_id
+    sched_tasks = temp_db.get_scheduled_tasks()
+    matching = [t for t in sched_tasks if t.title == "Check Packet Task"]
+    assert len(matching) == 1
+    assert matching[0].note_id == note.id
+
+    # List alarms shows linked note
+    alarms_list = time_tool.list_alarms()
+    assert f"`#{note.id}`" in alarms_list
+
+    # Schedule existing task with note
+    t2 = temp_db.create_task(title="Another Task", tier=Tier.SYSTEM_1)
+    sched_res = time_tool.schedule_task_alarm(t2.task_id, when="30m", note_id=note.id)
+    assert f"`#{note.id}`" in sched_res
+    refreshed_t2 = temp_db.get_task(t2.task_id)
+    assert refreshed_t2.note_id == note.id
+
+
+def test_chat_session_active_notes_awareness_and_slash_commands(temp_db: Database, tmp_path: Path):
+    # Pre-populate an active note in DB
+    note = temp_db.create_note(title="Ongoing Boids Recon", content="flocking equations verified.")
+
+    orch = Orchestrator(db=temp_db, progress_dir=tmp_path / "progress")
+    session = BatonChatSession(
+        db=temp_db,
+        orchestrator=orch,
+        model_name="qwen3:14b",
+    )
+
+    # 1. Dynamic 1-line note awareness banner injected into session.messages
+    system_messages = [m["content"] for m in session.messages if m["role"] == "system"]
+    assert any("Ongoing Boids Recon" in m and "active ephemeral scratchpad" in m for m in system_messages)
+
+    # 2. Slash commands
+    assert session.handle_slash_command("/notes") is True
+    assert session.handle_slash_command(f"/note {note.id}") is True
+    assert session.handle_slash_command(f"/dismiss {note.id}") is True
+
+    # Note is now dismissed
+    assert len(temp_db.get_active_notes()) == 0

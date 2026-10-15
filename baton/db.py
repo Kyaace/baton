@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -14,6 +14,7 @@ from baton.models import (
     Artifact,
     ArtifactType,
     DAGPlan,
+    EphemeralNote,
     Job,
     JobStatus,
     Task,
@@ -77,6 +78,7 @@ class Database:
                     started_at TIMESTAMP,
                     completed_at TIMESTAMP,
                     scheduled_at TIMESTAMP,
+                    note_id INTEGER,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
                 );
 
@@ -101,15 +103,28 @@ class Database:
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS ephemeral_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP NOT NULL,
+                    dismissed INTEGER DEFAULT 0
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_tier_status ON tasks(tier, status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_job ON tasks(job_id);
+                CREATE INDEX IF NOT EXISTS idx_notes_active ON ephemeral_notes(dismissed, expires_at);
             """)
 
-            # Migration check: ensure scheduled_at exists on existing tables before creating index
+            # Migration check: ensure scheduled_at and note_id exist on existing tables before creating index
             table_info = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
             if table_info and "scheduled_at" not in table_info:
                 conn.execute("ALTER TABLE tasks ADD COLUMN scheduled_at TIMESTAMP")
+            if table_info and "note_id" not in table_info:
+                conn.execute("ALTER TABLE tasks ADD COLUMN note_id INTEGER")
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(status, scheduled_at);")
 
@@ -212,8 +227,8 @@ class Database:
                     """
                     INSERT INTO tasks (
                         task_id, job_id, title, tier, task_type, status,
-                        prompt_template, tool_name, tool_params, priority, scheduled_at, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        prompt_template, tool_name, tool_params, priority, scheduled_at, note_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tp.id,
@@ -227,6 +242,7 @@ class Database:
                         params_json,
                         tp.priority,
                         tp.scheduled_at,
+                        tp.note_id,
                         now,
                     ),
                 )
@@ -251,6 +267,7 @@ class Database:
                         depends_on=tp.depends_on,
                         priority=tp.priority,
                         scheduled_at=tp.scheduled_at,
+                        note_id=tp.note_id,
                         created_at=now,
                     )
                 )
@@ -346,13 +363,24 @@ class Database:
         scheduled = self.get_scheduled_tasks(job_id=job_id, tier=tier)
         return scheduled[0] if scheduled else None
 
-    def set_task_schedule(self, task_id: str, scheduled_at: Optional[datetime]) -> bool:
-        """Sets or clears the scheduled execution time for a task."""
+    def set_task_schedule(
+        self,
+        task_id: str,
+        scheduled_at: Optional[datetime],
+        note_id: Optional[int] = None,
+    ) -> bool:
+        """Sets or clears the scheduled execution time for a task, optionally linking a note_id."""
         with self.get_connection() as conn:
-            cursor = conn.execute(
-                "UPDATE tasks SET scheduled_at = ? WHERE task_id = ?",
-                (scheduled_at, task_id),
-            )
+            if note_id is not None:
+                cursor = conn.execute(
+                    "UPDATE tasks SET scheduled_at = ?, note_id = ? WHERE task_id = ?",
+                    (scheduled_at, note_id, task_id),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE tasks SET scheduled_at = ? WHERE task_id = ?",
+                    (scheduled_at, task_id),
+                )
             return cursor.rowcount > 0
 
     def get_in_progress_tasks(self) -> list[Task]:
@@ -429,6 +457,8 @@ class Database:
         depends_on: Optional[list[str]] = None,
         scheduled_at: Optional[datetime | str] = None,
         clear_schedule: bool = False,
+        note_id: Optional[int] = None,
+        clear_note: bool = False,
     ) -> None:
         """Updates editable fields of an existing task and synchronizes dependencies and readiness."""
         updates: list[str] = []
@@ -457,6 +487,11 @@ class Database:
         elif scheduled_at is not None:
             updates.append("scheduled_at = ?")
             params.append(scheduled_at)
+        if clear_note:
+            updates.append("note_id = NULL")
+        elif note_id is not None:
+            updates.append("note_id = ?")
+            params.append(note_id)
 
         with self.get_connection() as conn:
             if updates:
@@ -499,6 +534,7 @@ class Database:
         job_id: Optional[str] = None,
         task_id: Optional[str] = None,
         scheduled_at: Optional[datetime] = None,
+        note_id: Optional[int] = None,
     ) -> Task:
         """Manually creates a new task with dependencies and inserts it into the queue."""
         tier_obj = Tier(tier) if isinstance(tier, str) else tier
@@ -548,8 +584,8 @@ class Database:
                 """
                 INSERT INTO tasks (
                     task_id, job_id, title, tier, task_type, status,
-                    prompt_template, tool_name, tool_params, priority, scheduled_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt_template, tool_name, tool_params, priority, scheduled_at, note_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -563,6 +599,7 @@ class Database:
                     params_json,
                     priority,
                     scheduled_at,
+                    note_id,
                     now,
                 ),
             )
@@ -586,6 +623,7 @@ class Database:
             depends_on=deps,
             priority=priority,
             scheduled_at=scheduled_at,
+            note_id=note_id,
             created_at=now,
         )
 
@@ -994,5 +1032,150 @@ class Database:
             started_at=row["started_at"],
             completed_at=row["completed_at"],
             scheduled_at=scheduled_at,
+            note_id=row["note_id"] if "note_id" in row.keys() else None,
             error_message=row["error_message"],
+        )
+
+    # -------------------------------------------------------------------------
+    # Ephemeral Notes (Mid-term Scratchpad)
+    # -------------------------------------------------------------------------
+
+    def create_note(self, title: str, content: str, ttl_hours: float = 24.0) -> EphemeralNote:
+        now = datetime.now()
+        expires_at = now + timedelta(hours=ttl_hours)
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO ephemeral_notes (title, content, created_at, updated_at, expires_at, dismissed)
+                VALUES (?, ?, ?, ?, ?, 0)
+                """,
+                (title, content, now, now, expires_at),
+            )
+            note_id = cursor.lastrowid
+        return EphemeralNote(
+            id=note_id,
+            title=title,
+            content=content,
+            created_at=now,
+            updated_at=now,
+            expires_at=expires_at,
+            dismissed=False,
+        )
+
+    def get_active_notes(self) -> list[EphemeralNote]:
+        """Returns all non-dismissed, non-expired notes ordered by updated_at DESC."""
+        now = datetime.now()
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM ephemeral_notes
+                WHERE dismissed = 0 AND expires_at > ?
+                ORDER BY updated_at DESC
+                """,
+                (now,),
+            ).fetchall()
+            return [self._row_to_note(r) for r in rows]
+
+    def get_note(self, note_id: int, apply_mercy_hour: bool = True) -> Optional[EphemeralNote]:
+        """
+        Retrieves a note by ID.
+        If apply_mercy_hour is True and the note is active with < 1 hour remaining,
+        extends expires_at by 1 hour from now (Mercy 1-Hour Rule).
+        """
+        now = datetime.now()
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM ephemeral_notes WHERE id = ?", (note_id,)).fetchone()
+            if not row:
+                return None
+            note = self._row_to_note(row)
+            if note.dismissed:
+                return note
+
+            # Mercy 1-Hour Rule: if active and has < 1 hour left, extend by 1 hour
+            if apply_mercy_hour and note.expires_at > now:
+                time_left = (note.expires_at - now).total_seconds()
+                if time_left < 3600:
+                    new_expiry = now + timedelta(hours=1)
+                    conn.execute(
+                        "UPDATE ephemeral_notes SET expires_at = ? WHERE id = ?",
+                        (new_expiry, note_id),
+                    )
+                    note.expires_at = new_expiry
+            return note
+
+    def append_note(self, note_id: int, text: str, ttl_hours: float = 24.0) -> Optional[EphemeralNote]:
+        """
+        Appends text to an active note, updates updated_at, and resets the TTL (default 24h).
+        Returns None if note does not exist or is dismissed.
+        """
+        note = self.get_note(note_id, apply_mercy_hour=False)
+        if not note or note.dismissed:
+            return None
+
+        separator = "\n\n" if note.content.strip() else ""
+        new_content = f"{note.content}{separator}{text}"
+        now = datetime.now()
+        new_expiry = now + timedelta(hours=ttl_hours)
+
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE ephemeral_notes
+                SET content = ?, updated_at = ?, expires_at = ?
+                WHERE id = ?
+                """,
+                (new_content, now, new_expiry, note_id),
+            )
+
+        note.content = new_content
+        note.updated_at = now
+        note.expires_at = new_expiry
+        return note
+
+    def dismiss_note(self, note_id: int) -> bool:
+        """Explicitly dismisses an ephemeral note."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE ephemeral_notes SET dismissed = 1 WHERE id = ?",
+                (note_id,),
+            )
+            return cursor.rowcount > 0
+
+    def keepalive_note(self, note_id: int, ttl_hours: float = 24.0) -> Optional[EphemeralNote]:
+        """Refreshes the TTL of an active note without appending content."""
+        note = self.get_note(note_id, apply_mercy_hour=False)
+        if not note or note.dismissed:
+            return None
+
+        now = datetime.now()
+        new_expiry = now + timedelta(hours=ttl_hours)
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE ephemeral_notes SET expires_at = ?, updated_at = ? WHERE id = ?",
+                (new_expiry, now, note_id),
+            )
+        note.expires_at = new_expiry
+        note.updated_at = now
+        return note
+
+    @staticmethod
+    def _row_to_note(row: sqlite3.Row) -> EphemeralNote:
+        def parse_dt(v):
+            if not v:
+                return None
+            if isinstance(v, str):
+                try:
+                    return datetime.fromisoformat(v)
+                except Exception:
+                    return None
+            return v
+
+        return EphemeralNote(
+            id=row["id"],
+            title=row["title"],
+            content=row["content"],
+            created_at=parse_dt(row["created_at"]),
+            updated_at=parse_dt(row["updated_at"]),
+            expires_at=parse_dt(row["expires_at"]) or datetime.now(),
+            dismissed=bool(row["dismissed"]),
         )

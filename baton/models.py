@@ -92,6 +92,7 @@ class TaskPlan(BaseModel):
     output_artifact: Optional[str] = None
     priority: int = 0
     scheduled_at: Optional[datetime] = None
+    note_id: Optional[int] = None
 
 
 from graphlib import TopologicalSorter, CycleError
@@ -263,7 +264,19 @@ class Task(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     scheduled_at: Optional[datetime] = None
+    note_id: Optional[int] = None
     error_message: Optional[str] = None
+
+
+class EphemeralNote(BaseModel):
+    """An ephemeral scratchpad post-it note stored in SQLite with a TTL."""
+    id: int
+    title: str
+    content: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    expires_at: datetime
+    dismissed: bool = False
 
 
 class Job(BaseModel):

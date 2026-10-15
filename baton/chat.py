@@ -75,8 +75,8 @@ SHELF_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "properties": {
                     "bundle_name": {
                         "type": "string",
-                        "enum": ["baton", "library", "newsboat", "sandbox", "sdr", "time", "docs", "vault", "wikipedia"],
-                        "description": "Name of the tool bundle to activate ('baton', 'library', 'newsboat', 'sandbox', 'sdr', 'time', 'docs', or 'vault').",
+                        "enum": ["baton", "library", "rss", "sandbox", "sdr", "time", "docs", "vault", "newsboat", "wikipedia"],
+                        "description": "Name of the tool bundle to activate ('baton', 'library', 'rss', 'sandbox', 'sdr', 'time', 'docs', or 'vault'). Aliases like 'newsboat' or 'wikipedia' are supported.",
                     },
                 },
                 "required": ["bundle_name"],
@@ -93,8 +93,8 @@ SHELF_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "properties": {
                     "bundle_name": {
                         "type": "string",
-                        "enum": ["baton", "library", "newsboat", "sandbox", "sdr", "time", "docs", "vault", "wikipedia"],
-                        "description": "Name of the tool bundle to deactivate ('baton', 'library', 'newsboat', 'sandbox', 'sdr', 'time', 'docs', or 'vault').",
+                        "enum": ["baton", "library", "rss", "sandbox", "sdr", "time", "docs", "vault", "newsboat", "wikipedia"],
+                        "description": "Name of the tool bundle to deactivate ('baton', 'library', 'rss', 'sandbox', 'sdr', 'time', 'docs', or 'vault').",
                     },
                 },
                 "required": ["bundle_name"],
@@ -459,10 +459,10 @@ WIKIPEDIA_TOOLS_SCHEMA: list[dict[str, Any]] = [
 ]
 
 # -----------------------------------------------------------------------------
-# 4. Newsboat RSS Schema ('newsboat' bundle)
+# 4. RSS Feed Schema ('rss' bundle, powered by Newsboat)
 # -----------------------------------------------------------------------------
 
-NEWSBOAT_TOOLS_SCHEMA: list[dict[str, Any]] = [
+RSS_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
@@ -494,6 +494,10 @@ NEWSBOAT_TOOLS_SCHEMA: list[dict[str, Any]] = [
                         "type": "integer",
                         "description": "Maximum number of articles to return (default: 10).",
                     },
+                    "since": {
+                        "type": "string",
+                        "description": "Optional time filter. Relative duration ('24h', '2d', '1w', '48') or ISO date ('2026-10-12'). Only returns articles published after this time.",
+                    },
                 },
             },
         },
@@ -517,6 +521,10 @@ NEWSBOAT_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of matching articles to return (default: 5).",
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "Optional time filter. Relative duration ('24h', '2d', '1w', '48') or ISO date ('2026-10-12'). Only returns articles published after this time.",
                     },
                 },
                 "required": ["query"],
@@ -545,6 +553,9 @@ NEWSBOAT_TOOLS_SCHEMA: list[dict[str, Any]] = [
         },
     },
 ]
+
+# Backwards compatibility alias
+NEWSBOAT_TOOLS_SCHEMA = RSS_TOOLS_SCHEMA
 
 # -----------------------------------------------------------------------------
 # 5. Sandboxed Python REPL & Verification Schema ('sandbox' bundle)
@@ -877,7 +888,7 @@ TIME_TOOLS_SCHEMA: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "schedule_task_alarm",
-            "description": "Defers or schedules an existing task in the queue to wake up and execute at a specific future time.",
+            "description": "Defers or schedules an existing task in the queue to wake up and execute at a specific future time, optionally linking a scratchpad note.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -889,6 +900,10 @@ TIME_TOOLS_SCHEMA: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "When to run the task. Accepts relative delays ('30m', 'in 2 hours', '1h 30m') or absolute ISO times ('2026-10-13T14:30:00', '14:30').",
                     },
+                    "note_id": {
+                        "type": "integer",
+                        "description": "Optional numeric ID of an ephemeral scratchpad note to link to this alarm.",
+                    },
                 },
                 "required": ["task_id", "when"],
             },
@@ -898,7 +913,7 @@ TIME_TOOLS_SCHEMA: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "create_scheduled_task",
-            "description": "Creates a new task in the queue scheduled for a future wake-up execution time.",
+            "description": "Creates a new task in the queue scheduled for a future wake-up execution time, optionally linking a scratchpad note.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -927,6 +942,10 @@ TIME_TOOLS_SCHEMA: list[dict[str, Any]] = [
                         "type": "integer",
                         "description": "Priority (higher runs earlier once ready, default 5).",
                     },
+                    "note_id": {
+                        "type": "integer",
+                        "description": "Optional numeric ID of an ephemeral scratchpad note to link to this scheduled task.",
+                    },
                 },
                 "required": ["title", "when"],
             },
@@ -936,7 +955,7 @@ TIME_TOOLS_SCHEMA: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "list_alarms",
-            "description": "Lists all pending scheduled task alarms with remaining countdowns.",
+            "description": "Lists all pending scheduled task alarms with remaining countdowns and linked notes.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -961,6 +980,122 @@ TIME_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_note",
+            "description": "Creates an ephemeral post-it scratchpad note on desk with a 24-hour expiration for mid-term coordination. Max 3,000 characters total.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short, clear title describing what is being tracked.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Note content (max 3,000 chars; store larger text in artifacts/Vault and reference link here).",
+                    },
+                    "ttl_hours": {
+                        "type": "number",
+                        "description": "Time to live in hours before expiration (default: 24.0).",
+                    },
+                },
+                "required": ["title", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_note",
+            "description": "Appends text to an active scratchpad note, enforcing append-only forward momentum and automatically resetting its 24-hour expiration. (Max 1,500 chars per append, 3,000 total).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {
+                        "type": "integer",
+                        "description": "Numeric ID of the note to append to.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text to append chronologically to the note.",
+                    },
+                    "ttl_hours": {
+                        "type": "number",
+                        "description": "New TTL in hours from now (default: 24.0).",
+                    },
+                },
+                "required": ["note_id", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_note",
+            "description": "Reads the full content of an active ephemeral scratchpad note by ID. Automatically extends expiration by 1 hour if < 1 hour remains (Mercy 1-Hour Rule).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {
+                        "type": "integer",
+                        "description": "Numeric ID of the note to read.",
+                    },
+                },
+                "required": ["note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_notes",
+            "description": "Lists all active ephemeral scratchpad notes currently on desk with IDs, titles, character counts, and remaining time.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dismiss_note",
+            "description": "Dismisses and clears an ephemeral scratchpad note off the desk immediately once its purpose is fulfilled.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {
+                        "type": "integer",
+                        "description": "Numeric ID of the note to dismiss.",
+                    },
+                },
+                "required": ["note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "keepalive_note",
+            "description": "Refreshes the 24-hour expiration of an active ephemeral note without appending any text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {
+                        "type": "integer",
+                        "description": "Numeric ID of the note to keep alive.",
+                    },
+                    "ttl_hours": {
+                        "type": "number",
+                        "description": "New TTL in hours from now (default: 24.0).",
+                    },
+                },
+                "required": ["note_id"],
             },
         },
     },
@@ -1159,6 +1294,10 @@ BUNDLE_ALIASES: dict[str, str] = {
     "wikipedia": "library",
     "wiki": "library",
     "zim": "library",
+    "newsboat": "rss",
+    "news": "rss",
+    "feeds": "rss",
+    "feed": "rss",
 }
 
 TOOL_BUNDLES: dict[str, dict[str, Any]] = {
@@ -1183,11 +1322,11 @@ TOOL_BUNDLES: dict[str, dict[str, Any]] = {
         "tools": WIKIPEDIA_TOOLS_SCHEMA,
         "always_active": False,
     },
-    "newsboat": {
-        "name": "newsboat",
-        "title": "Newsboat RSS Feed Ingestion",
-        "description": "Offline RSS news monitoring, feed listing, article search, and full-text reading across 12+ tech/science feeds.",
-        "tools": NEWSBOAT_TOOLS_SCHEMA,
+    "rss": {
+        "name": "rss",
+        "title": "RSS News & Feed Reader",
+        "description": "Offline RSS news monitoring, feed listing, article search, and full-text reading across registered feeds (powered by Newsboat).",
+        "tools": RSS_TOOLS_SCHEMA,
         "always_active": False,
     },
     "sandbox": {
@@ -1207,7 +1346,7 @@ TOOL_BUNDLES: dict[str, dict[str, Any]] = {
     "time": {
         "name": "time",
         "title": "Wall-Clock Time & Task Alarm Scheduler",
-        "description": "Real-world UTC and local time, timezone information, and task alarm scheduling (deferring or waking up tasks at specific future times).",
+        "description": "Real-world UTC and local time, timezone information, task alarms, and ephemeral 24h post-it scratchpad notes (save_note, append_note, read_note, list_notes, dismiss_note, keepalive_note).",
         "tools": TIME_TOOLS_SCHEMA,
         "always_active": False,
     },
@@ -1309,9 +1448,105 @@ CURATED_TOOL_CHEATSHEETS: dict[str, dict[str, Any]] = {
     "tool_help": {
         "summary": "Provides documentation, accepted parameter aliases, usage instructions, and working examples for any tool.",
         "parameters": {
-            "tool_name": "(string, required) Name of the tool to inspect (e.g. 'add_task', 'start_orchestration').",
+            "tool_name": "(string, required) Name of the tool to inspect (e.g. 'add_task', 'rss_search', 'start_orchestration').",
         },
-        "example": "tool_help(tool_name='add_task')",
+        "example": "tool_help(tool_name='rss_search')",
+    },
+    "rss_search": {
+        "summary": "Full-text search across offline RSS article titles and content with optional feed filter and time cutoff.",
+        "parameters": {
+            "query": "(string, required) Search keyword or phrase (e.g. 'fridge', 'cyberattack', 'battery').",
+            "feed": "(string, optional) Optional feed title filter (e.g. 'Ars Technica', 'Hacker News', 'Nature').",
+            "since": "(string, optional) Time cutoff filter. Supports relative durations ('24h', '2d', '1w', '48') or ISO dates ('2026-10-12'). Only returns articles published after this time. Aliases: since_hours.",
+            "limit": "(integer, optional) Maximum number of matching articles (default: 5).",
+        },
+        "example": "rss_search(query='fridge', since='24h', limit=5)",
+    },
+    "rss_read_article": {
+        "summary": "Reads the full clean text/markdown content of an RSS article using its numeric ID.",
+        "parameters": {
+            "id": "(integer, required) The numeric article ID obtained from rss_search or rss_latest. Aliases: item_id.",
+            "max_chars": "(integer, optional) Maximum characters of article text to retrieve (default: 3500).",
+        },
+        "example": "rss_read_article(id=114)",
+    },
+    "rss_latest": {
+        "summary": "Fetches the newest RSS articles across subscribed feeds with IDs, titles, publication dates, and links.",
+        "parameters": {
+            "feed": "(string, optional) Optional feed title filter.",
+            "unread_only": "(boolean, optional) If true, only returns unread articles (default: false).",
+            "since": "(string, optional) Time cutoff filter (e.g. '24h', '2d', '1w'). Aliases: since_hours.",
+            "limit": "(integer, optional) Maximum number of articles to return (default: 10).",
+        },
+        "example": "rss_latest(limit=10, since='24h')",
+    },
+    "zim_list_corpora": {
+        "summary": "Lists all offline ZIM knowledge archives currently mounted on disk (e.g. 'wikipedia', 'python', 'wikimed', 'movies').",
+        "parameters": {},
+        "example": "zim_list_corpora()",
+    },
+    "wiki_search": {
+        "summary": "Searches mounted offline ZIM archives for articles matching a query.",
+        "parameters": {
+            "query": "(string, required) Search query terms.",
+            "corpus": "(string, optional) Target corpus alias from zim_list_corpora ('wikipedia', 'python', 'wikimed', or 'all'). Default: 'wikipedia'.",
+            "limit": "(integer, optional) Maximum search results (default: 5).",
+        },
+        "example": "wiki_search(query='asyncio', corpus='python', limit=5)",
+    },
+    "wiki_read_section": {
+        "summary": "Extracts the text of a specific named section from an article in a mounted ZIM corpus.",
+        "parameters": {
+            "title": "(string, required) Exact title of the article.",
+            "section": "(string, required) Heading name of the section (use wiki_toc to inspect available headings).",
+            "corpus": "(string, optional) Target corpus alias ('wikipedia', 'python', 'wikimed'). Default: 'wikipedia'.",
+        },
+        "example": "wiki_read_section(title='Boids', section='Behavioral rules')",
+    },
+    "save_note": {
+        "summary": "Creates an ephemeral post-it scratchpad note on desk with a 24-hour expiration for mid-term coordination. Max 3,000 characters total.",
+        "parameters": {
+            "title": "(string, required) Short, clear title describing what is being tracked.",
+            "content": "(string, required) Note content (max 3,000 chars; store larger text in artifacts/Vault and reference link here).",
+            "ttl_hours": "(number, optional) Expiration in hours (default: 24.0).",
+        },
+        "example": "save_note(title='Boids Simulation Execution Plan', content='Phase 1: Verify 3 flocking equations.\\nPhase 2: Synthesize simulation module.')",
+    },
+    "append_note": {
+        "summary": "Appends text to an active note, enforcing append-only forward momentum and automatically resetting the 24-hour expiration.",
+        "parameters": {
+            "note_id": "(integer, required) Numeric ID of the note to append to.",
+            "text": "(string, required) Text to append chronologically (max 1,500 chars per append, 3,000 total).",
+            "ttl_hours": "(number, optional) New TTL in hours from now (default: 24.0).",
+        },
+        "example": "append_note(note_id=1, text='Phase 1 complete: Formulas verified from wiki. Proceeding to simulation.')",
+    },
+    "read_note": {
+        "summary": "Reads the full content of an ephemeral note. Automatically grants a 1-hour Mercy extension if < 1 hour remains.",
+        "parameters": {
+            "note_id": "(integer, required) Numeric ID of the note to read.",
+        },
+        "example": "read_note(note_id=1)",
+    },
+    "list_notes": {
+        "summary": "Lists all active ephemeral scratchpad notes currently on desk with IDs, titles, char counts, and time remaining.",
+        "parameters": {},
+        "example": "list_notes()",
+    },
+    "dismiss_note": {
+        "summary": "Explicitly dismisses an ephemeral scratchpad note off the desk immediately once its purpose is fulfilled.",
+        "parameters": {
+            "note_id": "(integer, required) Numeric ID of the note to dismiss.",
+        },
+        "example": "dismiss_note(note_id=1)",
+    },
+    "keepalive_note": {
+        "summary": "Refreshes the 24-hour expiration of an active ephemeral note without appending text.",
+        "parameters": {
+            "note_id": "(integer, required) Numeric ID of the note to keep alive.",
+            "ttl_hours": "(number, optional) New TTL in hours from now (default: 24.0).",
+        },
+        "example": "keepalive_note(note_id=1, ttl_hours=24.0)",
     },
 }
 
@@ -1331,14 +1566,14 @@ To prevent context window bloat and tool distraction, tools are organized into m
 - 'core' (ACTIVE): Baseline shelf controls (list_tool_bundles, activate_tool_bundle, deactivate_tool_bundle, tool_help).
 - 'baton' (ACTIVE in Chat): Baton queue management, task creation (add_task), queue stepping, start_orchestration, and artifact review.
 - 'library' (ON SHELF): Offline Kiwix ZIM archive explorer and reader. Inspects, searches, and reads from any locally mounted .zim files on disk (general knowledge, Python documentation, medical references, etc.).
-- 'newsboat' (ON SHELF): Offline RSS news monitoring across 12+ tech/science feeds (Ars Technica, Nature, NASA, MIT Tech Review, Krebs, etc.).
+- 'rss' (ON SHELF): Offline RSS news monitoring across 12+ tech/science feeds (Ars Technica, Nature, NASA, MIT Tech Review, Krebs, etc.) powered by Newsboat. Aliases: 'newsboat', 'news'.
 - 'sandbox' (ON SHELF): Isolated Python execution, AST syntax verification, and pytest test suite runner.
 - 'sdr' (ON SHELF): RTL-SDR RF spectrum analysis, carrier detection, audio recording, and telemetry decoding.
-- 'time' (ON SHELF): Real-world UTC and local system time, timezone grounding, and task alarm scheduling (deferring or waking up tasks in the future).
+- 'time' (ON SHELF): Real-world UTC and local system time, timezone grounding, task alarms, and ephemeral 24h post-it scratchpad notes (save_note, append_note, read_note, list_notes, dismiss_note, keepalive_note).
 - 'docs' (ON SHELF): Offline API and technical documentation (Dash/Zeal .docset archives) for exact method signatures, classes, and docstrings.
 - 'vault' (ON SHELF): Personal local notes and project artifact search powered by SQLite FTS5 with BM25 ranking.
 
-If you need capabilities from an inactive bundle on the shelf, call `activate_tool_bundle(bundle_name="library" | "newsboat" | "sandbox" | "sdr" | "time" | "docs" | "vault")`.
+If you need capabilities from an inactive bundle on the shelf, call `activate_tool_bundle(bundle_name="library" | "rss" | "sandbox" | "sdr" | "time" | "docs" | "vault")`.
 Once activated, those tools immediately become available on your toolbelt for subsequent tool calls.
 You can return a bundle to the shelf when finished using `deactivate_tool_bundle(bundle_name=...)` to free context tokens.
 
@@ -1412,6 +1647,7 @@ class BatonChatSession:
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_COPILOT_PROMPT}
         ]
+        self._inject_active_notes_awareness()
 
         # Session Logging setup (logs to baton/logs/chat_session_<ts>.log and baton/logs/chat_latest.log)
         self.logs_dir = logs_dir if logs_dir is not None else Path("baton/logs")
@@ -1458,6 +1694,20 @@ class BatonChatSession:
                 f.write(entry_text)
         except Exception as e:
             logger.debug("Failed writing to chat log: %s", e)
+
+    def _inject_active_notes_awareness(self) -> None:
+        """Injects dynamic 1-line note awareness into system prompt if active scratchpad notes exist."""
+        try:
+            active_notes = self.db.get_active_notes()
+            if active_notes:
+                notes_summary = ", ".join(f'#{n.id} ("{n.title}")' for n in active_notes)
+                banner = (
+                    f"[SYSTEM CONTEXT: You have {len(active_notes)} active ephemeral scratchpad post-it note(s) on your desk from previous sessions: {notes_summary}. "
+                    f"To inspect full content or append updates, activate the 'time' tool bundle and use 'read_note' or 'append_note'.]"
+                )
+                self.messages.append({"role": "system", "content": banner})
+        except Exception as e:
+            logger.debug("Failed querying active notes for chat session awareness: %s", e)
 
     @property
     def zim_tool(self) -> ZimTool:
@@ -1665,10 +1915,16 @@ class BatonChatSession:
                     libs = [l["library"] for l in self.docs_tool.list_libraries()]
                     res["available_libraries"] = libs
                     res["libraries_count"] = len(libs)
-                elif bundle_name == "newsboat" and self.newsboat_tool:
-                    feeds = [f["title"] for f in self.newsboat_tool.list_feeds()]
-                    res["subscribed_feeds"] = feeds
-                    res["feeds_count"] = len(feeds)
+                elif bundle_name in ("rss", "newsboat"):
+                    if self.newsboat_tool:
+                        feeds = [f["title"] for f in self.newsboat_tool.list_feeds()]
+                        res["subscribed_feeds"] = feeds
+                        res["feeds_count"] = len(feeds)
+                    else:
+                        res["warning"] = (
+                            "Newsboat RSS cache database not found at 'baton/data/rss/cache.db'. "
+                            "Tools will fail until '.\\scripts\\reload_newsboat.bat' is executed."
+                        )
                 elif bundle_name == "vault" and self.vault_tool:
                     st = self.vault_tool.get_status()
                     res["total_documents"] = st.get("documents_count", 0)
@@ -1981,65 +2237,90 @@ class BatonChatSession:
                     ),
                 }
 
-            # Wikipedia Bundle Tools ('wikipedia')
+            # Wikipedia Bundle Tools ('wikipedia' / 'library')
             elif name == "wiki_search":
                 if not self.zim_tool:
                     return {"error": "ZimTool is not available (no .zim file configured)."}
-                return {"result": self.zim_tool.search(args["query"], limit=args.get("limit", 5))}
+                return {"result": self.zim_tool.search(args["query"], limit=args.get("limit", 5), corpus=args.get("corpus"))}
 
             elif name == "wiki_read_lead":
                 if not self.zim_tool:
                     return {"error": "ZimTool is not available."}
-                return {"result": self.zim_tool.read_lead(args["title"])}
+                return {"result": self.zim_tool.read_lead(args["title"], corpus=args.get("corpus"))}
 
             elif name == "wiki_read_section":
                 if not self.zim_tool:
                     return {"error": "ZimTool is not available."}
-                return {"result": self.zim_tool.read_section(args["title"], args["section"])}
+                return {"result": self.zim_tool.read_section(args["title"], args["section"], corpus=args.get("corpus"))}
 
             elif name == "wiki_infobox":
                 if not self.zim_tool:
                     return {"error": "ZimTool is not available."}
-                return {"result": self.zim_tool.get_infobox(args["title"])}
+                return {"result": self.zim_tool.get_infobox(args["title"], corpus=args.get("corpus"))}
 
             elif name == "wiki_toc":
                 if not self.zim_tool:
                     return {"error": "ZimTool is not available."}
-                return {"result": self.zim_tool.get_toc(args["title"])}
+                return {"result": self.zim_tool.get_toc(args["title"], corpus=args.get("corpus"))}
 
-            # Newsboat Bundle Tools ('newsboat')
+            # RSS / Newsboat Bundle Tools ('rss' / 'newsboat')
             elif name == "rss_list_feeds":
                 if not self.newsboat_tool:
-                    return {"error": "NewsboatTool is not available (no cache.db found)."}
+                    return {
+                        "error": (
+                            "Newsboat/RSS tool is not available: SQLite cache database not found at 'baton/data/rss/cache.db'. "
+                            "Please run '.\\scripts\\reload_newsboat.bat' to initialize and fetch feeds."
+                        )
+                    }
                 return {"feeds": self.newsboat_tool.list_feeds()}
 
             elif name == "rss_latest":
                 if not self.newsboat_tool:
-                    return {"error": "NewsboatTool is not available."}
+                    return {
+                        "error": (
+                            "Newsboat/RSS tool is not available: SQLite cache database not found at 'baton/data/rss/cache.db'. "
+                            "Please run '.\\scripts\\reload_newsboat.bat' to initialize and fetch feeds."
+                        )
+                    }
                 return {
                     "articles": self.newsboat_tool.get_latest_articles(
                         feed_query=args.get("feed"),
                         unread_only=args.get("unread_only", False),
                         limit=args.get("limit", 10),
+                        since=args.get("since") or args.get("since_hours"),
                     )
                 }
 
             elif name == "rss_search":
                 if not self.newsboat_tool:
-                    return {"error": "NewsboatTool is not available."}
+                    return {
+                        "error": (
+                            "Newsboat/RSS tool is not available: SQLite cache database not found at 'baton/data/rss/cache.db'. "
+                            "Please run '.\\scripts\\reload_newsboat.bat' to initialize and fetch feeds."
+                        )
+                    }
                 return {
                     "results": self.newsboat_tool.search_articles(
                         args["query"],
                         feed_query=args.get("feed"),
                         limit=args.get("limit", 5),
+                        since=args.get("since") or args.get("since_hours"),
                     )
                 }
 
             elif name == "rss_read_article":
                 if not self.newsboat_tool:
-                    return {"error": "NewsboatTool is not available."}
+                    return {
+                        "error": (
+                            "Newsboat/RSS tool is not available: SQLite cache database not found at 'baton/data/rss/cache.db'. "
+                            "Please run '.\\scripts\\reload_newsboat.bat' to initialize and fetch feeds."
+                        )
+                    }
+                article_id = args.get("id") if "id" in args else args.get("item_id")
+                if article_id is None:
+                    return {"error": "Missing required parameter 'id': specify the numeric article ID to read."}
                 return self.newsboat_tool.read_article(
-                    int(args["id"]), max_chars=args.get("max_chars", 3500)
+                    int(article_id), max_chars=args.get("max_chars", 3500)
                 )
 
             # Sandbox Bundle Tools ('sandbox')
@@ -2149,6 +2430,12 @@ class BatonChatSession:
                 "create_scheduled_task",
                 "list_alarms",
                 "cancel_alarm",
+                "save_note",
+                "append_note",
+                "read_note",
+                "list_notes",
+                "dismiss_note",
+                "keepalive_note",
             ):
                 if not self.time_tool:
                     return {"error": "TimeTool is not available."}
@@ -2339,6 +2626,7 @@ class BatonChatSession:
         parts = cmd_line.strip().split(maxsplit=1)
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
+        rest = arg
 
         if cmd in ("/exit", "/quit", "/q"):
             console.print("[dim]Exiting Baton Chat. Have a productive session![/]")
@@ -2500,6 +2788,47 @@ class BatonChatSession:
                 console.print("[red]TimeTool is not available.[/]")
             return True
 
+        elif cmd in ("/notes", "/note_list"):
+            try:
+                active = self.db.get_active_notes()
+            except Exception:
+                active = []
+            if not active:
+                console.print("[dim]No active ephemeral scratchpad notes on desk.[/]")
+            else:
+                table = Table(title=f"Active Ephemeral Notes ({len(active)} on desk)", show_header=True, header_style="bold yellow")
+                table.add_column("ID", style="bold cyan", width=6)
+                table.add_column("Title", style="bold white")
+                table.add_column("Chars", style="dim", width=12)
+                table.add_column("Expires In", style="green", width=14)
+                now = datetime.now()
+                for n in active:
+                    delta = (n.expires_at - now).total_seconds()
+                    cd_str = self.time_tool._format_delta(delta) if delta > 0 else "Expired"
+                    table.add_row(f"#{n.id}", n.title, f"{len(n.content)} chars", cd_str)
+                console.print(table)
+            return True
+
+        elif cmd == "/note":
+            clean_arg = arg.strip().lstrip("#")
+            if not clean_arg or not clean_arg.isdigit():
+                console.print("[yellow]Usage: /note <id> (e.g. /note 1)[/]")
+            else:
+                note_id = int(clean_arg)
+                note_str = self.time_tool.read_note(note_id)
+                console.print(Markdown(note_str))
+            return True
+
+        elif cmd == "/dismiss":
+            clean_arg = arg.strip().lstrip("#")
+            if not clean_arg or not clean_arg.isdigit():
+                console.print("[yellow]Usage: /dismiss <id> (e.g. /dismiss 1)[/]")
+            else:
+                note_id = int(clean_arg)
+                res_str = self.time_tool.dismiss_note(note_id)
+                console.print(res_str)
+            return True
+
         elif cmd == "/docs":
             if not self.docs_tool:
                 console.print("[red]DocsTool is not available.[/]")
@@ -2539,13 +2868,22 @@ class BatonChatSession:
 
     def print_welcome(self) -> None:
         active_str = ", ".join(self.active_bundles)
+        try:
+            active_notes = self.db.get_active_notes()
+        except Exception:
+            active_notes = []
+        notes_line = ""
+        if active_notes:
+            notes_line = f"\n[bold yellow]📝 Active Scratchpad Notes ({len(active_notes)}):[/] [white]{', '.join(f'#{n.id} ({n.title})' for n in active_notes)}[/] [dim](view with /notes, /note <id>)[/]"
+
         console.print(
             Panel.fit(
                 f"[bold cyan]🏏 Baton System 1 Copilot[/] [dim]({self.model_name})[/]\n"
                 "[dim]Zero-lag conversational task planner, offline knowledge library & news scout.[/]\n"
                 f"[dim]Active Toolbelt:[/] [bold green]{active_str}[/]  |  [dim]Shelf:[/] [yellow]/shelf[/], [yellow]/bundle <name>[/]\n"
-                f"[dim]Live Session Log:[/] [bold cyan]{self.latest_log_path}[/] [dim]({self.session_log_path.name})[/]\n"
-                "[dim]Commands:[/] [bold yellow]/tasks[/], [bold yellow]/status[/], [bold yellow]/artifacts[/], [bold yellow]/step[/], [bold yellow]/help[/], [bold yellow]/exit[/]",
+                f"[dim]Live Session Log:[/] [bold cyan]{self.latest_log_path}[/] [dim]({self.session_log_path.name})[/]"
+                f"{notes_line}\n"
+                "[dim]Commands:[/] [bold yellow]/tasks[/], [bold yellow]/notes[/], [bold yellow]/status[/], [bold yellow]/artifacts[/], [bold yellow]/step[/], [bold yellow]/help[/], [bold yellow]/exit[/]",
                 border_style="cyan",
             )
         )
@@ -2575,6 +2913,9 @@ class BatonChatSession:
         table.add_row("/shelf or /bundles", "Inspect tool shelf and active toolbelt bundles")
         table.add_row("/bundle <name>", "Activate/deactivate bundle (e.g. /bundle baton, /bundle library, /bundle sandbox, /bundle newsboat, /bundle docs, /bundle vault, /bundle all)")
         table.add_row("/tasks [status]", "Instantly view task table (filter by ready, blocked, completed, failed)")
+        table.add_row("/notes", "List active ephemeral scratchpad notes on desk with IDs, char counts, and time remaining")
+        table.add_row("/note <id>", "Read full text of scratchpad note by ID (e.g. /note 1)")
+        table.add_row("/dismiss <id>", "Dismiss scratchpad note from desk immediately")
         table.add_row("/status", "Show engine statuses (Ollama, Colibrì) and queue counts")
         table.add_row("/artifacts", "List generated briefing dossiers and synthesis artifacts")
         table.add_row("/step [task_id]", "Step the queue and execute highest priority ready task")

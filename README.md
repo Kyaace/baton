@@ -5,13 +5,15 @@
 ## Architecture & Modes
 
 - **System 1 (Agile Scout / Copilot):** Fast reasoning and tool-calling model (e.g. Qwen3:14B via Ollama @ ~28 tok/s) equipped with modular tool bundles:
-  - `core`: Tool Shelf discovery and on-demand bundle activation.
-  - `baton`: Deterministic priority queue, DAG task creation, and artifact inspection.
-  - `wikipedia`: Offline encyclopedic lookups using Kiwix ZIM archives.
-  - `newsboat`: Offline RSS news monitoring and reader across 12+ tech/science publications.
+  - `core`: Tool Shelf discovery, on-demand bundle activation, and `tool_help`.
+  - `baton`: Deterministic priority queue, DAG task creation, orchestration (`start_orchestration`), and artifact inspection.
+  - `library`: Offline multi-corpus ZIM archive explorer and reader (Wikipedia, Python docs, WikiMed, etc.). Alias: `wikipedia`.
+  - `rss`: Offline RSS news monitoring and reader across 12+ tech/science publications with time filtering (`since`). Alias: `newsboat`.
   - `sandbox`: Isolated Python AST verification, REPL evaluation, and pytest test suite execution.
   - `sdr`: RTL-SDR spectrum sweeps (`rtl_power`), carrier detection, audio recordings, and RF telemetry decoding.
-  - `time`: Real-world UTC and local time grounding, timezone offsets, and task alarm scheduling (deferring or waking up tasks in the future).
+  - `time`: Real-world UTC/local time grounding, timezone offsets, task alarm scheduling, and ephemeral 24h post-it scratchpad notes with Mercy 1-Hour rules and character caps (`save_note`, `append_note`, `read_note`, `list_notes`, `dismiss_note`, `keepalive_note`).
+  - `docs`: Offline API documentation and exact method signatures (Dash/Zeal .docset archives).
+  - `vault`: Personal notes and project artifact full-text search (SQLite FTS5 with BM25 ranking).
 - **System 2 (Deep Macro-Planner / Synthesizer):** Frontier MoE model (e.g. DeepSeek-V4-Flash via Colibrì @ ~0.8 tok/s) that operates tool-blind, consuming briefing dossiers compiled by System 1 to synthesize structured task plans and complete codebase implementations.
 - **Mode A Mutual Exclusion:** Dynamically stops and starts the respective model engines to guarantee 100% exclusive GPU VRAM allocation.
 

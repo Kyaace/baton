@@ -13,6 +13,9 @@ from baton.db import Database
 
 logger = logging.getLogger("baton.tools.time")
 
+MAX_NOTE_CHARS = 3000
+MAX_APPEND_CHARS = 1500
+
 
 def parse_time_spec(spec: str, base_time: Optional[datetime] = None) -> datetime:
     """Parses relative deltas, absolute ISO-8601 timestamps, or time-of-day strings.
@@ -146,8 +149,9 @@ class TimeTool:
         task_id: str,
         when: Optional[str] = None,
         delay_or_timestamp: Optional[str] = None,
+        note_id: Optional[int] = None,
     ) -> str:
-        """Schedules or defers an existing task in the queue to a future time."""
+        """Schedules or defers an existing task in the queue to a future time, optionally linking an ephemeral note."""
         task = self.db.get_task(task_id)
         if not task:
             return f"Error: Task '{task_id}' not found in database."
@@ -160,18 +164,26 @@ class TimeTool:
         now = datetime.now()
         delta_s = (target_dt - now).total_seconds()
 
+        note_info = ""
+        if note_id is not None:
+            note = self.db.get_note(note_id, apply_mercy_hour=False)
+            if note:
+                note_info = f"\n- **Linked Note:** `#{note.id}` ({note.title})"
+            else:
+                return f"Error: Note `#{note_id}` not found to link to alarm."
+
         if delta_s <= 0:
             # Setting schedule in the past or immediately
-            self.db.set_task_schedule(task_id, None)
-            return f"Task '{task_id}' scheduled for immediate execution (schedule cleared)."
+            self.db.set_task_schedule(task_id, None, note_id=note_id)
+            return f"Task '{task_id}' scheduled for immediate execution (schedule cleared).{note_info}"
 
-        self.db.set_task_schedule(task_id, target_dt)
+        self.db.set_task_schedule(task_id, target_dt, note_id=note_id)
 
         countdown_str = self._format_delta(delta_s)
         return (
             f"✅ **Alarm Scheduled for Task:** `{task.task_id}` ({task.title})\n"
             f"- **Execution Time:** `{target_dt.strftime('%Y-%m-%d %H:%M:%S')}`\n"
-            f"- **Wake Countdown:** In {countdown_str} ({int(delta_s)} seconds)\n"
+            f"- **Wake Countdown:** In {countdown_str} ({int(delta_s)} seconds){note_info}\n"
             "- **Status:** Deferred until alarm trigger."
         )
 
@@ -187,8 +199,9 @@ class TimeTool:
         params: Optional[dict[str, Any]] = None,
         priority: int = 5,
         job_id: Optional[str] = None,
+        note_id: Optional[int] = None,
     ) -> str:
-        """Creates a new task already scheduled for a future wake-up time."""
+        """Creates a new task already scheduled for a future wake-up time, optionally linking an ephemeral note."""
         target_spec = when or delay_or_timestamp
         if not target_spec:
             return "Error: Missing time specification ('when' or 'delay_or_timestamp')."
@@ -196,6 +209,14 @@ class TimeTool:
         target_dt = parse_time_spec(target_spec)
         now = datetime.now()
         delta_s = (target_dt - now).total_seconds()
+
+        note_info = ""
+        if note_id is not None:
+            note = self.db.get_note(note_id, apply_mercy_hour=False)
+            if note:
+                note_info = f"\n- **Linked Note:** `#{note.id}` ({note.title})"
+            else:
+                return f"Error: Note `#{note_id}` not found to link to scheduled task."
 
         task = self.db.create_task(
             title=title,
@@ -207,6 +228,7 @@ class TimeTool:
             priority=priority,
             job_id=job_id,
             scheduled_at=target_dt,
+            note_id=note_id,
         )
 
         countdown_str = self._format_delta(delta_s)
@@ -214,7 +236,7 @@ class TimeTool:
             f"✅ **New Scheduled Task Created:** `{task.task_id}`\n"
             f"- **Title:** {task.title}\n"
             f"- **Tier:** `{task.tier.value}`\n"
-            f"- **Scheduled Wake:** `{target_dt.strftime('%Y-%m-%d %H:%M:%S')}` (in {countdown_str})\n"
+            f"- **Scheduled Wake:** `{target_dt.strftime('%Y-%m-%d %H:%M:%S')}` (in {countdown_str}){note_info}\n"
             f"- **Status:** `{task.status.value}` (Waiting for alarm)"
         )
 
@@ -227,8 +249,8 @@ class TimeTool:
         now = datetime.now()
         lines = [
             f"### Active Task Alarms ({len(tasks)} scheduled)",
-            "| Task ID | Tier | Title | Target Time | Countdown |",
-            "| :--- | :--- | :--- | :--- | :--- |",
+            "| Task ID | Tier | Title | Target Time | Countdown | Linked Note |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- |",
         ]
 
         for t in tasks:
@@ -237,8 +259,9 @@ class TimeTool:
             delta = (t.scheduled_at - now).total_seconds()
             cd_str = self._format_delta(delta) if delta > 0 else "Ready now"
             sched_str = t.scheduled_at.strftime("%Y-%m-%d %H:%M:%S")
+            note_str = f"`#{t.note_id}`" if t.note_id else "-"
             lines.append(
-                f"| `{t.task_id}` | `{t.tier.value}` | {t.title} | `{sched_str}` | {cd_str} |"
+                f"| `{t.task_id}` | `{t.tier.value}` | {t.title} | `{sched_str}` | {cd_str} | {note_str} |"
             )
 
         return "\n".join(lines)
@@ -256,6 +279,138 @@ class TimeTool:
         action_msg = "Task is now immediately runnable." if run_now else "Schedule cleared."
         return f"Alarm cancelled for task `{task_id}`. {action_msg}"
 
+    # -------------------------------------------------------------------------
+    # Ephemeral Post-it Scratchpad Notes
+    # -------------------------------------------------------------------------
+
+    def save_note(self, title: str, content: str, ttl_hours: float = 24.0) -> str:
+        """Saves a new ephemeral scratchpad post-it note with an expiration time."""
+        clean_title = title.strip()
+        clean_content = content.strip()
+        if not clean_title:
+            return "Error: Note title cannot be empty."
+        if not clean_content:
+            return "Error: Note content cannot be empty."
+
+        if len(clean_content) > MAX_NOTE_CHARS:
+            return (
+                f"Error: Note content length ({len(clean_content)} chars) exceeds the {MAX_NOTE_CHARS}-character scratchpad limit. "
+                "Please shorten your note, or store extensive content into an artifact file or Vault ('vault_store') and link to it in this note."
+            )
+
+        note = self.db.create_note(title=clean_title, content=clean_content, ttl_hours=ttl_hours)
+        now = datetime.now()
+        rem_s = (note.expires_at - now).total_seconds()
+        countdown_str = self._format_delta(rem_s)
+
+        return (
+            f"📝 **Ephemeral Note Created:** `#{note.id}`\n"
+            f"- **Title:** {note.title}\n"
+            f"- **Length:** {len(note.content)} / {MAX_NOTE_CHARS} chars\n"
+            f"- **Expires At:** `{note.expires_at.strftime('%Y-%m-%d %H:%M:%S')}` (in {countdown_str})\n"
+            "- **Status:** Active on desk (Append-only; auto-refreshes on append or mercy read)."
+        )
+
+    def append_note(self, note_id: int, text: str, ttl_hours: float = 24.0) -> str:
+        """Appends text to an active note, enforcing append-only forward momentum and resetting TTL."""
+        clean_text = text.strip()
+        if not clean_text:
+            return "Error: Appended text cannot be empty."
+
+        if len(clean_text) > MAX_APPEND_CHARS:
+            return (
+                f"Error: Appended text length ({len(clean_text)} chars) exceeds the {MAX_APPEND_CHARS}-character limit per append. "
+                "Please shorten your addition, or store extensive content into an artifact file or Vault and reference the link."
+            )
+
+        existing = self.db.get_note(note_id, apply_mercy_hour=False)
+        if not existing or existing.dismissed:
+            return f"Error: Active note `#{note_id}` not found or has been dismissed."
+
+        projected_len = len(existing.content) + len(clean_text) + 2
+        if projected_len > MAX_NOTE_CHARS:
+            return (
+                f"Error: Appending would expand note `#{note_id}` to {projected_len} characters, exceeding the {MAX_NOTE_CHARS}-character scratchpad limit. "
+                "Please shorten your addition, or store extensive content in an artifact file or Vault ('vault_store') and reference the link."
+            )
+
+        updated = self.db.append_note(note_id=note_id, text=clean_text, ttl_hours=ttl_hours)
+        if not updated:
+            return f"Error: Could not append to note `#{note_id}`."
+
+        now = datetime.now()
+        rem_s = (updated.expires_at - now).total_seconds()
+        countdown_str = self._format_delta(rem_s)
+
+        return (
+            f"📝 **Ephemeral Note `#{note_id}` Appended:**\n"
+            f"- **Title:** {updated.title}\n"
+            f"- **Updated Length:** {len(updated.content)} / {MAX_NOTE_CHARS} chars\n"
+            f"- **TTL Reset To:** `{updated.expires_at.strftime('%Y-%m-%d %H:%M:%S')}` (in {countdown_str})"
+        )
+
+    def read_note(self, note_id: int) -> str:
+        """Reads the full content of an ephemeral note. Activates 1-hour Mercy rule if < 1h remains."""
+        note = self.db.get_note(note_id, apply_mercy_hour=True)
+        if not note:
+            return f"Error: Note `#{note_id}` not found or has expired."
+        if note.dismissed:
+            return f"Note `#{note_id}` ('{note.title}') was dismissed."
+
+        now = datetime.now()
+        rem_s = (note.expires_at - now).total_seconds()
+        countdown_str = self._format_delta(rem_s) if rem_s > 0 else "Expired"
+
+        created_str = note.created_at.strftime("%Y-%m-%d %H:%M:%S") if note.created_at else "Unknown"
+        updated_str = note.updated_at.strftime("%Y-%m-%d %H:%M:%S") if note.updated_at else "Unknown"
+
+        return (
+            f"### 📝 Ephemeral Note `#{note.id}`: {note.title}\n"
+            f"- **Created:** `{created_str}` | **Updated:** `{updated_str}`\n"
+            f"- **Time Remaining:** {countdown_str} (Expires `{note.expires_at.strftime('%Y-%m-%d %H:%M:%S')}`)\n\n"
+            f"```text\n{note.content}\n```"
+        )
+
+    def list_notes(self) -> str:
+        """Lists active ephemeral notes currently on the agent's desk."""
+        notes = self.db.get_active_notes()
+        if not notes:
+            return "No active ephemeral notes on desk."
+
+        now = datetime.now()
+        lines = [
+            f"### Active Ephemeral Notes ({len(notes)} on desk)",
+            "| ID | Title | Chars | Time Remaining |",
+            "| :--- | :--- | :--- | :--- |",
+        ]
+        for n in notes:
+            delta = (n.expires_at - now).total_seconds()
+            cd_str = self._format_delta(delta) if delta > 0 else "Expired"
+            lines.append(f"| `#{n.id}` | {n.title} | {len(n.content)} chars | {cd_str} |")
+        return "\n".join(lines)
+
+    def dismiss_note(self, note_id: int) -> str:
+        """Dismisses an ephemeral note from the desk immediately."""
+        ok = self.db.dismiss_note(note_id)
+        if ok:
+            return f"✅ Ephemeral note `#{note_id}` dismissed from desk."
+        return f"Error: Note `#{note_id}` not found."
+
+    def keepalive_note(self, note_id: int, ttl_hours: float = 24.0) -> str:
+        """Refreshes the TTL of an active note without appending text."""
+        note = self.db.keepalive_note(note_id, ttl_hours=ttl_hours)
+        if not note:
+            return f"Error: Active note `#{note_id}` not found or already dismissed."
+
+        now = datetime.now()
+        rem_s = (note.expires_at - now).total_seconds()
+        countdown_str = self._format_delta(rem_s)
+        return (
+            f"✅ **Ephemeral Note `#{note_id}` Kept Alive:**\n"
+            f"- **Title:** {note.title}\n"
+            f"- **New Expiration:** `{note.expires_at.strftime('%Y-%m-%d %H:%M:%S')}` (in {countdown_str})"
+        )
+
     def execute(self, tool_name: str, params: dict[str, Any]) -> str:
         """Deterministic dispatcher for named tool calls."""
         name = tool_name.lower().strip()
@@ -265,6 +420,7 @@ class TimeTool:
             return self.schedule_task_alarm(
                 task_id=params["task_id"],
                 when=params.get("when") or params.get("delay_or_timestamp"),
+                note_id=params.get("note_id"),
             )
         elif name in ("create_scheduled_task", "new_scheduled_task"):
             return self.create_scheduled_task(
@@ -277,6 +433,7 @@ class TimeTool:
                 params=params.get("params"),
                 priority=params.get("priority", 5),
                 job_id=params.get("job_id"),
+                note_id=params.get("note_id"),
             )
         elif name in ("list_alarms", "alarms"):
             return self.list_alarms()
@@ -284,6 +441,29 @@ class TimeTool:
             return self.cancel_alarm(
                 task_id=params["task_id"],
                 run_now=params.get("run_now", True),
+            )
+        elif name in ("save_note", "create_note", "new_note"):
+            return self.save_note(
+                title=params["title"],
+                content=params["content"],
+                ttl_hours=float(params.get("ttl_hours", 24.0)),
+            )
+        elif name in ("append_note", "add_to_note"):
+            return self.append_note(
+                note_id=int(params["note_id"]),
+                text=params["text"],
+                ttl_hours=float(params.get("ttl_hours", 24.0)),
+            )
+        elif name in ("read_note", "get_note", "view_note"):
+            return self.read_note(note_id=int(params["note_id"]))
+        elif name in ("list_notes", "notes", "active_notes"):
+            return self.list_notes()
+        elif name in ("dismiss_note", "clear_note", "delete_note"):
+            return self.dismiss_note(note_id=int(params["note_id"]))
+        elif name in ("keepalive_note", "refresh_note", "extend_note"):
+            return self.keepalive_note(
+                note_id=int(params["note_id"]),
+                ttl_hours=float(params.get("ttl_hours", 24.0)),
             )
         else:
             return f"Error: Unknown Time tool '{tool_name}'."

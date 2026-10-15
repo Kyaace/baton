@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from baton.tools.newsboat import NewsboatTool, clean_html
+from baton.tools.newsboat import NewsboatTool, clean_html, parse_since_timestamp
 
 
 @pytest.fixture
@@ -155,3 +155,60 @@ def test_newsboat_tool_connection_immutable_and_timeout(mock_newsboat_db: Path):
         # Verify that write operations are rejected because mode=ro is enforced
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("INSERT INTO rss_feed (rssurl, title) VALUES ('https://bad.com', 'Bad')")
+
+
+def test_parse_since_timestamp():
+    # Fixed reference time: 2026-10-14 12:00:00 UTC = 1791979200
+    ref_now = 1791979200.0
+
+    # None and empty
+    assert parse_since_timestamp(None) is None
+    assert parse_since_timestamp("") is None
+
+    # Epoch passthrough
+    assert parse_since_timestamp(1700000000, current_time=ref_now) == 1700000000
+    assert parse_since_timestamp("1700000000", current_time=ref_now) == 1700000000
+
+    # Relative hours (numeric)
+    assert parse_since_timestamp(24, current_time=ref_now) == int(ref_now - 24 * 3600)
+    assert parse_since_timestamp(2.5, current_time=ref_now) == int(ref_now - 2.5 * 3600)
+
+    # Relative strings: hours, days, weeks, minutes
+    assert parse_since_timestamp("24h", current_time=ref_now) == int(ref_now - 24 * 3600)
+    assert parse_since_timestamp("24 hours", current_time=ref_now) == int(ref_now - 24 * 3600)
+    assert parse_since_timestamp("2d", current_time=ref_now) == int(ref_now - 2 * 86400)
+    assert parse_since_timestamp("1w", current_time=ref_now) == int(ref_now - 7 * 86400)
+    assert parse_since_timestamp("30m", current_time=ref_now) == int(ref_now - 30 * 60)
+
+    # ISO date strings
+    iso_ts = parse_since_timestamp("2026-10-12")
+    assert iso_ts is not None
+    assert iso_ts > 0
+
+
+def test_newsboat_tool_time_filtering(mock_newsboat_db: Path):
+    # In mock_newsboat_db:
+    # guid-1 has pubDate = 1700000000 (Lithium Batteries)
+    # guid-2 has pubDate = 1700001000 (Exoplanet)
+    nb = NewsboatTool(db_path=mock_newsboat_db)
+
+    # Filter with cutoff between the two articles: 1700000500
+    # Should only return guid-2
+    latest_filtered = nb.get_latest_articles(since=1700000500)
+    assert len(latest_filtered) == 1
+    assert latest_filtered[0]["title"] == "New Exoplanet Discovered in Habitable Zone"
+
+    # Search with cutoff between the two articles:
+    # Searching "Lithium" (pubDate 1700000000) with since=1700000500 should return 0
+    search_filtered = nb.search_articles("Lithium", since=1700000500)
+    assert len(search_filtered) == 0
+
+    # Searching "Exoplanet" with since=1700000500 should return 1
+    search_exo = nb.search_articles("Exoplanet", since=1700000500)
+    assert len(search_exo) == 1
+
+    # Dispatcher execution with since
+    disp_res = nb.execute("rss_latest", {"since": 1700000500})
+    assert "Exoplanet" in disp_res
+    assert "Lithium" not in disp_res
+

@@ -13,6 +13,7 @@ from baton.chat import (
     BATON_TOOLS_SCHEMA,
     CORE_TOOLS_SCHEMA,
     NEWSBOAT_TOOLS_SCHEMA,
+    RSS_TOOLS_SCHEMA,
     SANDBOX_TOOLS_SCHEMA,
     SDR_TOOLS_SCHEMA,
     SHELF_TOOLS_SCHEMA,
@@ -156,21 +157,22 @@ def test_tool_shelf_dynamic_activation_and_deactivation(chat_session: BatonChatS
     assert deact_sandbox["success"] is True
     assert "sandbox" not in chat_session.active_bundles
 
-    # 6. Activate Newsboat bundle
+    # 6. Activate Newsboat bundle (resolves to 'rss')
     act_res = chat_session.execute_tool("activate_tool_bundle", {"bundle_name": "newsboat"})
     assert act_res["success"] is True
-    assert "newsboat" in chat_session.active_bundles
+    assert act_res["activated_bundle"] == "rss"
+    assert "rss" in chat_session.active_bundles
 
     expanded_schema = chat_session.get_active_tools_schema()
     expanded_names = {t["function"]["name"] for t in expanded_schema}
     assert "rss_search" in expanded_names
     assert "rss_latest" in expanded_names
-    assert len(expanded_schema) == len(SHELF_TOOLS_SCHEMA) + len(NEWSBOAT_TOOLS_SCHEMA)
+    assert len(expanded_schema) == len(SHELF_TOOLS_SCHEMA) + len(RSS_TOOLS_SCHEMA)
 
-    # 7. Deactivate Newsboat bundle
-    deact_res = chat_session.execute_tool("deactivate_tool_bundle", {"bundle_name": "newsboat"})
+    # 7. Deactivate RSS bundle
+    deact_res = chat_session.execute_tool("deactivate_tool_bundle", {"bundle_name": "rss"})
     assert deact_res["success"] is True
-    assert "newsboat" not in chat_session.active_bundles
+    assert "rss" not in chat_session.active_bundles
 
     # 8. Activate SDR bundle
     act_sdr = chat_session.execute_tool("activate_tool_bundle", {"bundle_name": "sdr"})
@@ -300,16 +302,25 @@ def test_execute_tool_newsboat_dispatch(chat_session: BatonChatSession):
     assert "feeds" in feeds_res
     assert feeds_res["feeds"][0]["title"] == "Ars Technica"
 
-    latest_res = chat_session.execute_tool("rss_latest", {"limit": 5})
+    latest_res = chat_session.execute_tool("rss_latest", {"limit": 5, "since": "24h"})
     assert "articles" in latest_res
     assert latest_res["articles"][0]["title"] == "Test AI Article"
+    mock_nb.get_latest_articles.assert_called_with(feed_query=None, unread_only=False, limit=5, since="24h")
 
-    search_res = chat_session.execute_tool("rss_search", {"query": "AI"})
+    search_res = chat_session.execute_tool("rss_search", {"query": "AI", "since": "48"})
     assert "results" in search_res
     assert search_res["results"][0]["snippet"] == "AI news..."
+    mock_nb.search_articles.assert_called_with("AI", feed_query=None, limit=5, since="48")
 
     read_res = chat_session.execute_tool("rss_read_article", {"id": 1})
     assert read_res["content"] == "Full text body"
+
+    # Verify actionable error message when newsboat_tool is not available
+    with patch("baton.chat.NewsboatTool", side_effect=FileNotFoundError("cache.db not found")):
+        chat_session._newsboat_tool = None
+        err_res = chat_session.execute_tool("rss_search", {"query": "test"})
+        assert "cache.db" in err_res["error"]
+        assert "reload_newsboat.bat" in err_res["error"]
 
 
 def test_execute_tool_sandbox_dispatch(chat_session: BatonChatSession, tmp_path: Path):
@@ -411,12 +422,12 @@ def test_slash_command_handlers(chat_session: BatonChatSession):
     assert chat_session.handle_slash_command("/adsb") is True
     assert chat_session.handle_slash_command("/telemetry") is True
 
-    # Test bundle toggle
+    # Test bundle toggle (newsboat resolves to rss)
     assert chat_session.handle_slash_command("/bundle newsboat") is True
-    assert "newsboat" in chat_session.active_bundles
+    assert "rss" in chat_session.active_bundles
 
     assert chat_session.handle_slash_command("/bundle newsboat") is True
-    assert "newsboat" not in chat_session.active_bundles
+    assert "rss" not in chat_session.active_bundles
 
     assert chat_session.handle_slash_command("/bundle all") is True
     assert chat_session.active_bundles == set(TOOL_BUNDLES.keys())
@@ -583,13 +594,23 @@ def test_tool_help_curated_and_fallback(chat_session: BatonChatSession):
     assert help_orch["source"] == "curated_cheatsheet"
     assert "max_steps" in help_orch["parameters"]
 
-    # 3. Schema fallback for python_eval (which has no curated entry)
+    # 3. Curated cheatsheet for rss_search and rss_read_article
+    help_rss = chat_session.execute_tool("tool_help", {"tool_name": "rss_search"})
+    assert help_rss["source"] == "curated_cheatsheet"
+    assert "since" in help_rss["parameters"]
+    assert "query" in help_rss["parameters"]
+
+    help_read = chat_session.execute_tool("tool_help", {"tool_name": "rss_read_article"})
+    assert help_read["source"] == "curated_cheatsheet"
+    assert "id" in help_read["parameters"]
+
+    # 4. Schema fallback for python_eval (which has no curated entry)
     help_eval = chat_session.execute_tool("tool_help", {"tool_name": "python_eval"})
     assert help_eval["source"] == "schema_fallback"
     assert "parameters" in help_eval
     assert "code" in help_eval["parameters"]
 
-    # 4. Unknown tool error
+    # 5. Unknown tool error
     help_err = chat_session.execute_tool("tool_help", {"tool_name": "completely_fictional_tool"})
     assert "error" in help_err
     assert "active_tools" in help_err

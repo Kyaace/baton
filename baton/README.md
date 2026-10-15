@@ -50,22 +50,31 @@ Baton resolves the hardware and cognitive trade-off between fast local copilots 
 **Interactive Chat Capabilities:**
 * **Instant, Zero-Latency Terminal Input:** Powered by `prompt_toolkit` with full line-editing, history, and smooth pasting without TUI redraw latency.
 * **Modular 'Tool Shelf' Architecture:** Tools are compartmentalized into distinct bundles to prevent context bloat and eliminate hallucinated tool calls on 14B models:
-    - `'core'` (Always active): Baseline tool shelf manager (`list_tool_bundles`, `activate_tool_bundle`, `deactivate_tool_bundle`).
-    - `'baton'` (Active in Chat by default, on shelf for research agents): Queue mutation and monitoring (`add_task`, `delete_task`, `retry_failed_tasks`, `queue_status`, `step_queue`, `list_tasks`, `get_task`, `list_artifacts`, `read_artifact`).
-    - `'wikipedia'` (On shelf): Offline Kiwix ZIM Wikipedia lookup (`wiki_search`, `wiki_read_section`, `wiki_infobox`, `wiki_toc`).
-    - `'newsboat'` (On shelf): Offline RSS news monitoring via WSL SQLite cache (`rss_list_feeds`, `rss_latest`, `rss_search`, `rss_read_article`).
+    - `'core'` (Always active): Baseline tool shelf manager (`list_tool_bundles`, `activate_tool_bundle`, `deactivate_tool_bundle`, `tool_help`).
+    - `'baton'` (Active in Chat by default, on shelf for research agents): Queue mutation and monitoring (`add_task`, `delete_task`, `retry_failed_tasks`, `queue_status`, `step_queue`, `start_orchestration`, `list_tasks`, `get_task`, `list_artifacts`, `read_artifact`).
+    - `'library'` (On shelf, alias: `'wikipedia'`): Offline multi-corpus ZIM archive explorer and reader (`zim_list_corpora`, `wiki_search`, `wiki_read_lead`, `wiki_read_section`, `wiki_infobox`, `wiki_toc`).
+    - `'rss'` (On shelf, alias: `'newsboat'`): Offline RSS news monitoring via SQLite cache with publication time filtering (`rss_list_feeds`, `rss_latest`, `rss_search`, `rss_read_article`).
     - `'sandbox'` (On shelf): Isolated Python evaluation, AST syntax checking, file staging, and pytest test suite runner (`python_eval`, `python_syntax_check`, `pytest_run`, `sandbox_write_file`, `sandbox_read_file`, `sandbox_list_files`).
-    - `'sdr'` (On shelf): RTL-SDR RF spectrum analysis, carrier detection, audio demodulation, and digital sensor telemetry decoding (`sdr_device_info`, `sdr_spectrum_scan`, `sdr_record_rf`, `sdr_decode_telemetry`).
+    - `'sdr'` (On shelf): RTL-SDR RF spectrum analysis, carrier detection, audio demodulation, and digital sensor telemetry decoding (`sdr_device_info`, `sdr_spectrum_scan`, `sdr_record_rf`, `sdr_decode_telemetry`, `sdr_adsb_tracking`, `sdr_decode_packet`).
+    - `'time'` (On shelf): Real-world UTC and local time grounding, task alarm scheduling, and ephemeral 24h post-it scratchpad notes with Mercy 1-Hour rules and character caps (`get_current_time`, `schedule_task_alarm`, `create_scheduled_task`, `list_alarms`, `cancel_alarm`, `save_note`, `append_note`, `read_note`, `list_notes`, `dismiss_note`, `keepalive_note`).
+    - `'docs'` (On shelf): Offline Dash/Zeal API docset symbol search, exact method signatures, and HTML-to-markdown documentation (`docs_list_libraries`, `docs_search`, `docs_read_symbol`, `docs_get_signature`).
+    - `'vault'` (On shelf): High-speed personal notes & local artifact BM25 full-text search (`vault_search`, `vault_read_document`, `vault_index_path`, `vault_status`).
 * **Research Agent Isolation:** Specialized System 1 recon agents (and `chat --research`) can be initialized without the `'baton'` bundle. This ensures research agents focus exclusively on factual recon without wasting token context or risking accidental queue modification.
 * **Instant Direct Slash Commands (<1ms feedback):**
   * `/shelf` or `/bundles`: Inspect the tool shelf and active toolbelt bundles.
-  * `/bundle <name>`: Toggle a bundle on/off the active toolbelt (e.g. `/bundle baton`, `/bundle sandbox`, `/bundle newsboat`, `/bundle wikipedia`, `/bundle sdr`, `/bundle all`).
+  * `/bundle <name>`: Toggle a bundle on/off the active toolbelt (e.g. `/bundle baton`, `/bundle library`, `/bundle rss`, `/bundle sandbox`, `/bundle sdr`, `/bundle time`, `/bundle docs`, `/bundle vault`, `/bundle all`).
+  * `/notes`: View active ephemeral scratchpad post-it notes currently on desk with remaining time.
+  * `/note <id>`: Read full text of an ephemeral scratchpad note.
+  * `/dismiss <id>`: Clear an ephemeral scratchpad note off the desk immediately.
+  * `/time`: Display current system time (local & UTC).
+  * `/alarms`: List scheduled task alarms and countdowns.
   * `/sdr`: Probe connected RTL-SDR hardware and tuner diagnostics instantly.
   * `/tasks [status]`: View the current task priority table instantly without LLM latency.
   * `/status`: Display queue counts and engine readiness (Ollama & Colibrì).
   * `/artifacts`: List produced dossiers and synthesis code.
   * `/step [task_id]`: Step and execute highest-priority ready task.
-  * `/model <name>`: Switch active Ollama model (e.g. `/model qwen2.5-coder:14b`).
+  * `/start [steps]`: Deterministically execute runnable tasks in sequence (default: 5 steps).
+  * `/model <name>`: Switch active Ollama model (e.g. `/model qwen3:14b`).
   * `/clear`: Clear terminal screen.
   * `/exit` or `/quit`: Exit chat.
 
@@ -125,10 +134,13 @@ baton/
 ├── cli.py             # CLI command dispatcher
 ├── tools/
 │   ├── __init__.py
-│   ├── zim.py         # Offline Kiwix Wikipedia reader (search, lead, section, infobox, toc)
-│   ├── newsboat.py    # Offline RSS news query engine (feeds, latest, search, article reader)
+│   ├── zim.py         # Offline Kiwix ZIM multi-archive reader (Wikipedia, Python docs, etc.)
+│   ├── newsboat.py    # Offline RSS news query engine with publication time filtering
 │   ├── sandbox.py     # Sandboxed Python REPL & verification engine (eval, syntax check, pytest)
-│   └── sdr.py         # RTL-SDR RF spectrum analysis, carrier detection, audio demod, and telemetry
+│   ├── sdr.py         # RTL-SDR RF spectrum analysis, carrier detection, audio demod, and telemetry
+│   ├── time_tool.py   # Wall-clock time grounding, task alarms, and ephemeral scratchpad note system
+│   ├── docs_tool.py   # Offline Dash/Zeal API docset symbol indexer & documentation reader
+│   └── vault.py       # Personal local notes & artifact BM25 full-text search (SQLite FTS5)
 ├── data/
 │   └── rss/           # Offline Newsboat SQLite cache (cache.db) & feed configuration (urls)
 ├── artifacts/
@@ -139,9 +151,12 @@ baton/
 │   └── progress/      # Live streaming atomic JSON task progress snapshots
 └── tests/
     ├── test_chat.py         # System 1 Copilot REPL, tool shelf, & function calling unit tests
-    ├── test_newsboat.py     # Newsboat RSS offline query engine unit tests
+    ├── test_newsboat.py     # Newsboat RSS offline query engine & time filter unit tests
     ├── test_sandbox.py      # Sandboxed Python execution, AST check, & pytest unit tests
     ├── test_sdr.py          # RTL-SDR spectrum sweep, demodulation, & telemetry unit tests
+    ├── test_time.py         # Time grounding, alarm scheduler, & ephemeral notes unit tests
+    ├── test_vault.py        # SQLite FTS5 BM25 search & document retrieval unit tests
+    ├── test_zim.py          # Multi-ZIM corpus routing & metadata sanitation unit tests
     ├── test_db.py           # SQLite and DAG dependency tests
     ├── test_orchestrator.py # End-to-end relay loop and multi-tier pipeline unit tests
     ├── test_progress.py     # Live SSE streaming, repetition detection, cancellation, & continuation tests

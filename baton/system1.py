@@ -523,7 +523,20 @@ class System1Runner:
                 raw_tool_data = self.sdr_tool.execute(task.tool_name, params)
             elif (
                 tool_lower.startswith("time_")
-                or tool_lower in ("get_current_time", "schedule_task_alarm", "create_scheduled_task", "list_alarms", "cancel_alarm")
+                or tool_lower.startswith("note_")
+                or tool_lower in (
+                    "get_current_time",
+                    "schedule_task_alarm",
+                    "create_scheduled_task",
+                    "list_alarms",
+                    "cancel_alarm",
+                    "save_note",
+                    "append_note",
+                    "read_note",
+                    "list_notes",
+                    "dismiss_note",
+                    "keepalive_note",
+                )
             ):
                 raw_tool_data = self.time_tool.execute(task.tool_name, params)
             elif tool_lower.startswith("doc_") or tool_lower.startswith("docs_"):
@@ -683,6 +696,13 @@ class System1Runner:
             f"# Mission Objective: {task.title}",
             f"Description: {task.prompt_template or ''}",
         ]
+
+        if task.note_id:
+            linked_note = self.db.get_note(task.note_id, apply_mercy_hour=True)
+            if linked_note and not linked_note.dismissed:
+                user_prompt_parts.append(
+                    f"## 📝 Attached Scratchpad Note (`#{linked_note.id}`: {linked_note.title}):\n{linked_note.content}"
+                )
 
         if raw_tool_data:
             # Budget raw tool data so it fits comfortably in prompt

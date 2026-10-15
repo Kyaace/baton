@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import os
 import re
 import sqlite3
@@ -12,6 +13,59 @@ from pathlib import Path
 from typing import Any, Optional
 
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger("baton.tools.newsboat")
+
+
+def parse_since_timestamp(
+    since: Optional[str | int | float], current_time: Optional[float] = None
+) -> Optional[int]:
+    """Parses a relative duration ('24h', '2d', '1w', 24) or ISO date into a Unix epoch cutoff timestamp."""
+    if since is None:
+        return None
+    now = current_time if current_time is not None else time.time()
+
+    if isinstance(since, (int, float)):
+        if since > 1_000_000_000:
+            return int(since)
+        return int(now - (since * 3600))
+
+    s = str(since).strip().lower()
+    if not s:
+        return None
+
+    # Check purely digits
+    if s.isdigit():
+        val = int(s)
+        if val > 1_000_000_000:
+            return val
+        return int(now - (val * 3600))
+
+    # Check relative expressions (e.g., 24h, 2d, 1w, 30m, 2 days, 24 hours)
+    rel_match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-z]+)$", s)
+    if rel_match:
+        val = float(rel_match.group(1))
+        unit = rel_match.group(2)
+        if unit in ("m", "min", "mins", "minute", "minutes"):
+            return int(now - (val * 60))
+        elif unit in ("h", "hr", "hrs", "hour", "hours"):
+            return int(now - (val * 3600))
+        elif unit in ("d", "day", "days"):
+            return int(now - (val * 86400))
+        elif unit in ("w", "wk", "wks", "week", "weeks"):
+            return int(now - (val * 604800))
+        elif unit in ("y", "yr", "yrs", "year", "years"):
+            return int(now - (val * 31536000))
+
+    # Check ISO date format (e.g., '2026-10-12' or '2026-10-12 10:00:00')
+    try:
+        dt = datetime.fromisoformat(s)
+        return int(dt.timestamp())
+    except Exception:
+        pass
+
+    logger.warning("Could not parse time filter '%s', ignoring time constraint.", since)
+    return None
 
 
 def find_default_newsboat_db() -> Optional[Path]:
@@ -134,8 +188,9 @@ class NewsboatTool:
         feed_query: Optional[str] = None,
         unread_only: bool = False,
         limit: int = 10,
+        since: Optional[str | int | float] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieves the newest articles, optionally filtered by feed name or unread state."""
+        """Retrieves the newest articles, optionally filtered by feed name, unread state, or time window."""
         where_clauses = ["1=1"]
         params: list[Any] = []
 
@@ -145,6 +200,12 @@ class NewsboatTool:
 
         if unread_only:
             where_clauses.append("i.unread = 1")
+
+        if since is not None:
+            cutoff = parse_since_timestamp(since)
+            if cutoff is not None:
+                where_clauses.append("i.pubDate >= ?")
+                params.append(cutoff)
 
         where_sql = " AND ".join(where_clauses)
         query = f"""
@@ -186,14 +247,21 @@ class NewsboatTool:
         query: str,
         feed_query: Optional[str] = None,
         limit: int = 5,
+        since: Optional[str | int | float] = None,
     ) -> list[dict[str, Any]]:
-        """Full-text search across article titles and content bodies."""
+        """Full-text search across article titles and content bodies, optionally filtered by feed or time window."""
         where_clauses = ["(i.title LIKE ? OR i.content LIKE ?)"]
         params: list[Any] = [f"%{query}%", f"%{query}%"]
 
         if feed_query:
             where_clauses.append("(f.title LIKE ? OR f.rssurl LIKE ?)")
             params.extend([f"%{feed_query}%", f"%{feed_query}%"])
+
+        if since is not None:
+            cutoff = parse_since_timestamp(since)
+            if cutoff is not None:
+                where_clauses.append("i.pubDate >= ?")
+                params.append(cutoff)
 
         where_sql = " AND ".join(where_clauses)
         sql = f"""
@@ -294,7 +362,8 @@ class NewsboatTool:
             feed_q = params.get("feed")
             limit = int(params.get("limit", 10))
             unread = bool(params.get("unread_only", False))
-            articles = self.get_latest_articles(feed_query=feed_q, unread_only=unread, limit=limit)
+            since = params.get("since") or params.get("since_hours")
+            articles = self.get_latest_articles(feed_query=feed_q, unread_only=unread, limit=limit, since=since)
             if not articles:
                 return "No articles found matching criteria."
             lines = [f"# Latest Articles (Top {len(articles)})"]
@@ -312,7 +381,8 @@ class NewsboatTool:
                 return "Error: Search query cannot be empty."
             feed_q = params.get("feed")
             limit = int(params.get("limit", 5))
-            results = self.search_articles(query, feed_query=feed_q, limit=limit)
+            since = params.get("since") or params.get("since_hours")
+            results = self.search_articles(query, feed_query=feed_q, limit=limit, since=since)
             if not results:
                 return f"No articles found matching query '{query}'."
             lines = [f"# RSS Search Results for '{query}' ({len(results)} matches)"]
