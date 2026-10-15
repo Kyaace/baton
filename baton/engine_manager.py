@@ -199,19 +199,23 @@ class EngineManager:
         if self.colibri_start_cmd:
             subprocess.run(self.colibri_start_cmd, cwd=str(self.repo_root), shell=True, check=False)
         else:
-            # Check local repository candidates and legacy local_llm fallback
+            # Check local repository candidates (Ornith / llama-server preferred, then DeepSeek-V4 fallback)
             script_candidates = [
+                self.repo_root / "scripts" / "run_ornith.bat",
+                self.repo_root / "scripts" / "run_ornith.sh",
                 self.repo_root / "scripts" / "run_deepseek_v4_gpu.bat",
                 self.repo_root / "scripts" / "start_coli_server.bat",
                 self.repo_root / "scripts" / "run_deepseek_v4_gpu.sh",
                 self.repo_root / "scripts" / "start_coli_server.sh",
+                Path("E:/dev/Antigravity/local_llm/scripts/run_ornith.bat"),
                 Path("E:/dev/Antigravity/local_llm/scripts/run_deepseek_v4_gpu.bat"),
                 Path("E:/dev/Antigravity/local_llm/scripts/start_coli_server.bat"),
             ]
             found_script = next((s for s in script_candidates if s.exists()), None)
             if found_script:
+                model_label = "Ornith (llama-server)" if "ornith" in found_script.name.lower() else "System 2 LLM"
                 if os.name == "nt" and found_script.suffix == ".bat":
-                    cmd = f'start "Colibri DeepSeek-V4" /min cmd /c "{found_script} serve > colibri_server.log 2>&1"'
+                    cmd = f'start "{model_label}" /min cmd /c "{found_script} serve > system2_server.log 2>&1"'
                     subprocess.run(cmd, cwd=str(self.repo_root), shell=True, check=False)
                 else:
                     subprocess.Popen([str(found_script), "serve"], cwd=str(self.repo_root), shell=True)
@@ -224,31 +228,50 @@ class EngineManager:
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
             if self.is_colibri_online():
-                logger.info("Colibrì DeepSeek-V4 server initialized successfully.")
+                logger.info("System 2 (Ornith / llama-server) initialized successfully.")
                 return True
             time.sleep(2.0)
 
         logger.warning(
-            "Colibrì server start timed out (endpoint: %s). Configure BATON_COLIBRI_START_CMD if customized.",
+            "System 2 server start timed out (endpoint: %s). Configure BATON_COLIBRI_START_CMD if customized.",
             self.colibri_url,
         )
         return False
 
     def stop_colibri(self) -> bool:
-        """Stops System 2 / Colibrì server and frees RAM and VRAM."""
+        """Stops System 2 / Colibrì / llama-server and frees RAM and VRAM."""
         if self.colibri_stop_cmd:
             subprocess.run(self.colibri_stop_cmd, cwd=str(self.repo_root), shell=True, check=False)
         else:
             # Check for local helper scripts
             script_candidates = [
+                self.repo_root / "scripts" / "stop_ornith.bat",
+                self.repo_root / "scripts" / "stop_ornith.sh",
                 self.repo_root / "scripts" / "stop_coli_server.bat",
                 self.repo_root / "scripts" / "stop_coli_server.sh",
+                Path("E:/dev/Antigravity/local_llm/scripts/stop_ornith.bat"),
                 Path("E:/dev/Antigravity/local_llm/scripts/stop_coli_server.bat"),
                 Path("E:/dev/Antigravity/local_llm/scripts/stop_coli_server.sh"),
             ]
             found_script = next((s for s in script_candidates if s.exists()), None)
             if found_script:
                 subprocess.run([str(found_script)], cwd=str(self.repo_root), shell=True, check=False)
+
+            # Ensure llama-server process is terminated on Windows
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/IM", "llama-server.exe"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-f", "llama-server"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
             # Check for local coli CLI wrapper if present
             coli_cmd = self.repo_root / "coli.cmd"

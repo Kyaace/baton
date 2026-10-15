@@ -5,7 +5,12 @@ echo ==================================================
 echo   Starting Colibri DeepSeek-V4 Server
 echo ==================================================
 
-:: Prefer run_deepseek_v4_gpu.bat if WSL CUDA is available
+:: Prefer run_ornith.bat (llama-server) if available, then run_deepseek_v4_gpu.bat
+if exist "%~dp0run_ornith.bat" (
+    call "%~dp0run_ornith.bat" %*
+    goto :done
+)
+
 if exist "%~dp0run_deepseek_v4_gpu.bat" (
     call "%~dp0run_deepseek_v4_gpu.bat" serve %*
     goto :done

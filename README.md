@@ -14,9 +14,10 @@
   - `time`: Real-world UTC/local time grounding, timezone offsets, task alarm scheduling, and ephemeral 24h post-it scratchpad notes with Mercy 1-Hour rules and character caps (`save_note`, `append_note`, `read_note`, `list_notes`, `dismiss_note`, `keepalive_note`).
   - `docs`: Offline API documentation and exact method signatures (Dash/Zeal .docset archives).
   - `vault`: Personal notes and project artifact full-text search (SQLite FTS5 with BM25 ranking).
-- **Mode A Mutual Exclusion:** Dynamically stops and starts the respective model engines to guarantee 100% exclusive GPU VRAM allocation.
+- **System 2 (Deep Nocturnal Synthesis):** High-capacity MoE reasoning model (Ornith-1.5-35B-A3B Q4_K_M via `llama-server` with Multi-Token Prediction and hybrid GPU/CPU expert offloading @ ~15.5 tok/s).
+- **Mode A Mutual Exclusion:** Dynamically stops and starts the respective model engines (Ollama for System 1, `llama-server` for System 2) to guarantee 100% exclusive GPU VRAM allocation.
 - **Cross-Process Concurrency Locking:** Enforces single-task execution across independent processes (TUI Auto-Tick, Chat Copilot `start_orchestration`, CLI) via database-level `IN_PROGRESS` mutual exclusion.
-- **Colibrì 429 Exponential Backoff:** Automatic retry on HTTP 429 with exponential delays (3s, 6s, 12s) to gracefully absorb brief GPU saturation and prompt cache evictions.
+- **Colibrì / System 2 429 Exponential Backoff:** Automatic retry on HTTP 429 with exponential delays (3s, 6s, 12s) to gracefully absorb brief GPU saturation and prompt cache evictions.
 
 
 ## Configuration & Environment Variables
@@ -26,15 +27,19 @@ Baton is completely decoupled and can be customized via environment variables:
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `BATON_OLLAMA_URL` | System 1 / Ollama API endpoint | `http://127.0.0.1:11434` |
-| `BATON_COLIBRI_URL` | System 2 / Colibrì OpenAI-compatible endpoint | `http://127.0.0.1:8000` |
+| `BATON_COLIBRI_URL` | System 2 / OpenAI-compatible endpoint | `http://127.0.0.1:8000` |
 | `BATON_SYSTEM1_MODEL`| Model name for System 1 | `qwen3:14b` |
-| `BATON_SYSTEM2_MODEL`| Model name for System 2 | Auto-detected / DeepSeek-V4 |
+| `BATON_SYSTEM2_MODEL`| Model name for System 2 | Auto-detected / `ornith-1.5-35b-a3b` |
 | `BATON_OLLAMA_START_CMD` | Optional hook command to start Ollama | System binary fallback |
 | `BATON_OLLAMA_STOP_CMD`  | Optional hook command to stop Ollama  | Process termination fallback |
-| `BATON_COLIBRI_START_CMD`| Optional hook command to start Colibrì | None |
-| `BATON_COLIBRI_STOP_CMD` | Optional hook command to stop Colibrì | CLI stop fallback |
+| `BATON_COLIBRI_START_CMD`| Hook command to start System 2 | Auto-detects `scripts/run_ornith.bat` (or `.sh`) |
+| `BATON_COLIBRI_STOP_CMD` | Hook command to stop System 2 | Auto-detects `scripts/stop_ornith.bat` (or `.sh`) |
 | `BATON_NEWSBOAT_DB`  | Path to custom Newsboat SQLite cache | `baton/data/rss/cache.db` |
 | `BATON_ZIM_PATH`     | Path to custom Kiwix Wikipedia `.zim` archive | Auto-detected / None |
+
+### System 2 Launchers (`scripts/`)
+- `scripts/run_ornith.bat` / `scripts/run_ornith.sh`: Launches `llama-server` with Ornith-1.5-35B-A3B Q4_K_M on port 8000, configuring 32k context, GPU offload (`-ngl 99`), MoE CPU expert offload (`-ot ".ffn_.*_exps.=CPU"`), and Multi-Token Prediction (`--spec-type draft-mtp`).
+- `scripts/stop_ornith.bat` / `scripts/stop_ornith.sh`: Gracefully terminates `llama-server` and frees all VRAM before System 1 resumes.
 
 ## Quick Start
 

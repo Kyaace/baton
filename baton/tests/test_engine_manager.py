@@ -172,3 +172,31 @@ def test_engine_manager_mode_a_mutual_exclusion(
     # Stop all
     em.stop_all()
     assert em.active_tier is None
+
+
+@patch("subprocess.run")
+@patch.object(EngineManager, "is_colibri_online")
+def test_engine_manager_prioritizes_ornith_script(mock_online, mock_subproc, tmp_path: Path):
+    """Verify that EngineManager prioritizes run_ornith.bat as the default System 2 engine."""
+    mock_online.side_effect = [False, True, False]
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    ornith_bat = scripts_dir / "run_ornith.bat"
+    ornith_bat.write_text("@echo off", encoding="utf-8")
+    stop_bat = scripts_dir / "stop_ornith.bat"
+    stop_bat.write_text("@echo off", encoding="utf-8")
+
+    em = EngineManager(repo_root=tmp_path)
+    res_start = em.start_colibri(timeout_sec=2)
+    assert res_start is True
+
+    # Check that subprocess.run was called with run_ornith.bat
+    called_cmd = mock_subproc.call_args_list[0][0][0]
+    assert "run_ornith.bat" in str(called_cmd)
+
+    # Check stop
+    res_stop = em.stop_colibri()
+    assert res_stop is True
+    stop_cmd = mock_subproc.call_args_list[1][0][0]
+    assert "stop_ornith.bat" in str(stop_cmd)
+

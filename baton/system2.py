@@ -149,7 +149,7 @@ class System2Runner:
                 pass
 
     def get_model_id(self) -> str:
-        """Dynamically discovers the model ID currently registered with Colibrì."""
+        """Dynamically discovers the model ID currently registered with Colibrì / llama-server."""
         if self._discovered_model:
             return self._discovered_model
         if self.model_name:
@@ -161,11 +161,11 @@ class System2Runner:
                 models = data.get("data", [])
                 if models and "id" in models[0]:
                     self._discovered_model = models[0]["id"]
-                    logger.info("Discovered Colibrì model ID: %s", self._discovered_model)
+                    logger.info("Discovered System 2 model ID: %s", self._discovered_model)
                     return self._discovered_model
         except Exception as e:
-            logger.debug("Failed to query Colibrì models: %s", e)
-        return "deepseek-v4-colibri"
+            logger.debug("Failed to query System 2 models: %s", e)
+        return "ornith-1.5-35b-a3b"
 
     def _post_with_retry(
         self,
