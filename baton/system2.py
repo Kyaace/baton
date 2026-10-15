@@ -167,6 +167,42 @@ class System2Runner:
             logger.debug("Failed to query Colibrì models: %s", e)
         return "deepseek-v4-colibri"
 
+    def _post_with_retry(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        stream: bool,
+        timeout: float | tuple[float, float] | None,
+        max_retries: int = 3,
+        backoff_delays: tuple[float, ...] = (3.0, 6.0, 12.0),
+    ) -> requests.Response:
+        """Sends POST request to Colibrì with exponential backoff on HTTP 429."""
+        for attempt in range(max_retries + 1):
+            if self._cancel_requested:
+                raise TaskCancelledError("System 2 generation stopped by user.")
+            res = requests.post(endpoint, json=payload, headers=headers, stream=stream, timeout=timeout)
+            if res.status_code == 429:
+                if attempt < max_retries:
+                    delay = backoff_delays[min(attempt, len(backoff_delays) - 1)]
+                    logger.warning(
+                        "Colibrì returned HTTP 429 (Too Many Requests). Backing off for %.1fs (attempt %d/%d)...",
+                        delay,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    sleep_intervals = int(delay / 0.1)
+                    for _ in range(sleep_intervals):
+                        if self._cancel_requested:
+                            res.close()
+                            raise TaskCancelledError("System 2 generation stopped by user.")
+                        time.sleep(0.1)
+                    continue
+            res.raise_for_status()
+            return res
+        res.raise_for_status()
+        return res
+
     def chat_completion(
         self,
         messages: list[dict[str, str]],
@@ -211,8 +247,7 @@ class System2Runner:
         if not stream:
             if self._cancel_requested:
                 raise TaskCancelledError("System 2 generation stopped by user.")
-            res = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
-            res.raise_for_status()
+            res = self._post_with_retry(endpoint, payload, headers, stream=False, timeout=timeout)
             data = res.json()
             elapsed = time.time() - t0
 
@@ -233,8 +268,7 @@ class System2Runner:
 
         # Streaming mode (SSE)
         try:
-            res = requests.post(endpoint, json=payload, headers=headers, stream=True, timeout=timeout)
-            res.raise_for_status()
+            res = self._post_with_retry(endpoint, payload, headers, stream=True, timeout=timeout)
             self._active_response = res
 
             content_chunks: list[str] = []

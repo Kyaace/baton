@@ -405,3 +405,35 @@ def test_tier_sticky_disabled_uses_scalar_priority(tmp_path: Path):
     assert engine_mgr.active_tier == Tier.SYSTEM_2
 
 
+def test_orchestrator_in_progress_concurrency_lock(tmp_path: Path):
+    """Verify that Orchestrator.step() refuses to start when any task is currently IN_PROGRESS."""
+    db = Database(tmp_path / "concurrency_lock.db")
+    engine_mgr = MockEngineManager()
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=MockSystem1(), system2=MockSystem2(), auto_verify=False)
+
+    job = db.create_job("Lock Job", "Test cross-runner concurrency lock")
+    t1 = db.create_task(title="Running Task", tier=Tier.SYSTEM_2, task_id="task_running", job_id=job.job_id)
+    t2 = db.create_task(title="Ready Task", tier=Tier.SYSTEM_2, task_id="task_ready", job_id=job.job_id)
+
+    # Claim task 1 so it becomes IN_PROGRESS
+    claimed = db.claim_specific_task(t1.task_id)
+    assert claimed is not None
+    assert claimed.status == TaskStatus.IN_PROGRESS
+    assert len(db.get_in_progress_tasks()) == 1
+
+    # Attempting to step should return None (locked out)
+    assert orch.step() is None
+    assert orch.step(task_id=t2.task_id) is None
+
+    # Complete task 1
+    db.mark_task_completed(t1.task_id, result_payload="done")
+    assert len(db.get_in_progress_tasks()) == 0
+
+    # Now step succeeds and claims task 2
+    stepped = orch.step()
+    assert stepped is not None
+    assert stepped.task_id == t2.task_id
+    assert stepped.status == TaskStatus.COMPLETED
+
+
+

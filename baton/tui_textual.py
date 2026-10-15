@@ -779,7 +779,7 @@ class BatonApp(App):
 
     def action_run_selected(self) -> None:
         """Enter: run selected task (if ready) or step queue."""
-        if self.is_running_task:
+        if self.is_running_task or self.orchestrator.db.get_in_progress_tasks():
             self.notify("An engine task is already running in the background.", severity="warning")
             return
 
@@ -837,7 +837,8 @@ class BatonApp(App):
     @work(thread=True)
     def action_step_queue(self) -> None:
         """Executes next runnable task in priority order."""
-        if self.is_running_task:
+        if self.is_running_task or self.orchestrator.db.get_in_progress_tasks():
+            self.notify("An engine task is already running in the background.", severity="warning")
             return
         self.is_running_task = True
         try:
@@ -884,9 +885,10 @@ class BatonApp(App):
                 self.update_inspector(task)
 
         if self.auto_tick_enabled and not self.is_running_task:
-            runnable = self.orchestrator.db.get_runnable_tasks()
-            if runnable:
-                self.run_task_worker(runnable[0].task_id)
+            if not self.orchestrator.db.get_in_progress_tasks():
+                runnable = self.orchestrator.db.get_runnable_tasks()
+                if runnable:
+                    self.run_task_worker(runnable[0].task_id)
 
 
 def main() -> None:

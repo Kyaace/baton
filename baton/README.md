@@ -112,6 +112,9 @@ Baton resolves the hardware and cognitive trade-off between fast local copilots 
 
 ## 3. Resilience & Long-Run Safeguards
 
+* **Global Concurrency Exclusion & Cross-Process Locking:** Guarantees single-task execution across independent processes (TUI Auto-Tick, Chat Copilot `start_orchestration`, CLI). Prevents multiple tasks from entering `IN_PROGRESS` simultaneously and colliding on single-GPU inference backends.
+* **HTTP 429 Exponential Backoff:** Wraps System 2 Colibrì generation requests with automatic backoff (up to 3 retries over 3s, 6s, 12s) to gracefully absorb brief engine saturation or prompt cache evictions without task failure.
+* **Inter-Step Orchestration Cooldown:** Enforces a 1.5s inter-task delay during `start_orchestration` batch runs to allow local LLM servers (Colibrì / Ollama) to release sockets, clear attention caches, and reset VRAM slots cleanly.
 * **Degenerate Repetition Detection:** Detects infinite token loops (e.g. `00000...` or periodic repeating cycles) in the stream tail and aborts cleanly to preserve valid code.
 * **Mid-Stream Task Cancellation:** Non-destructive cancellation (`cancel_active()`) via `<kbd>s</kbd>` or `.\baton.cmd stop` without having to terminate Colibrì or Ollama.
 * **Context Ceiling Detection & Seamless Continuation:** Automatically detects when generation reaches Colibrì's token budget (`finish_reason: "length"`), using trailing unclosed assistant messages (`resolve_generation_prompt`) to continue generating across turns without loss of context.
@@ -160,6 +163,7 @@ baton/
     ├── test_db.py           # SQLite and DAG dependency tests
     ├── test_orchestrator.py # End-to-end relay loop and multi-tier pipeline unit tests
     ├── test_progress.py     # Live SSE streaming, repetition detection, cancellation, & continuation tests
+    ├── test_system2_retry.py# System 2 Colibrì HTTP 429 backoff & retry recovery tests
     └── test_tui.py          # Textual TUI mounting, modals, and actions tests
 ```
 

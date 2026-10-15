@@ -14,8 +14,10 @@
   - `time`: Real-world UTC/local time grounding, timezone offsets, task alarm scheduling, and ephemeral 24h post-it scratchpad notes with Mercy 1-Hour rules and character caps (`save_note`, `append_note`, `read_note`, `list_notes`, `dismiss_note`, `keepalive_note`).
   - `docs`: Offline API documentation and exact method signatures (Dash/Zeal .docset archives).
   - `vault`: Personal notes and project artifact full-text search (SQLite FTS5 with BM25 ranking).
-- **System 2 (Deep Macro-Planner / Synthesizer):** Frontier MoE model (e.g. DeepSeek-V4-Flash via Colibrì @ ~0.8 tok/s) that operates tool-blind, consuming briefing dossiers compiled by System 1 to synthesize structured task plans and complete codebase implementations.
 - **Mode A Mutual Exclusion:** Dynamically stops and starts the respective model engines to guarantee 100% exclusive GPU VRAM allocation.
+- **Cross-Process Concurrency Locking:** Enforces single-task execution across independent processes (TUI Auto-Tick, Chat Copilot `start_orchestration`, CLI) via database-level `IN_PROGRESS` mutual exclusion.
+- **Colibrì 429 Exponential Backoff:** Automatic retry on HTTP 429 with exponential delays (3s, 6s, 12s) to gracefully absorb brief GPU saturation and prompt cache evictions.
+
 
 ## Configuration & Environment Variables
 

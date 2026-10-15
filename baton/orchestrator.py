@@ -275,6 +275,14 @@ class Orchestrator:
         Pulls the next runnable task (or a specific ready task), manages engine transitions,
         executes the task, records artifacts, and unlocks downstream tasks.
         """
+        # Concurrency exclusion: if any task is already IN_PROGRESS, refuse to start a concurrent step
+        in_prog = self.db.get_in_progress_tasks()
+        if in_prog:
+            logger.warning(
+                "Cannot step: task '%s' is already in progress.", in_prog[0].task_id
+            )
+            return None
+
         if task_id:
             target_task = self.db.get_task(task_id)
             if not target_task or target_task.status != TaskStatus.READY:

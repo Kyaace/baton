@@ -2192,15 +2192,39 @@ class BatonChatSession:
                         "artifact_path": completed_task.artifact_path,
                     }
                 else:
+                    in_prog = self.db.get_in_progress_tasks()
+                    msg = (
+                        f"Cannot step: Task '{in_prog[0].task_id}' is actively running in another process."
+                        if in_prog
+                        else "No runnable task found in READY state to execute."
+                    )
                     return {
                         "success": False,
-                        "message": "No runnable task found in READY state to execute.",
+                        "message": msg,
                     }
 
             elif name == "start_orchestration":
                 max_steps = int(args.get("max_steps", 5))
                 executed_tasks = []
                 for step_idx in range(max_steps):
+                    in_prog = self.db.get_in_progress_tasks()
+                    if in_prog:
+                        all_t = self.db.get_all_tasks()
+                        status_counts: dict[str, int] = {}
+                        for t in all_t:
+                            status_counts[t.status.value] = status_counts.get(t.status.value, 0) + 1
+                        remaining_ready = status_counts.get("ready", 0)
+                        remaining_blocked = status_counts.get("blocked", 0)
+                        return {
+                            "success": False,
+                            "steps_executed": len(executed_tasks),
+                            "executed_tasks": executed_tasks,
+                            "queue_status": status_counts,
+                            "remaining_ready": remaining_ready,
+                            "remaining_blocked": remaining_blocked,
+                            "message": f"Orchestration paused: Task '{in_prog[0].task_id}' is actively running in another process.",
+                        }
+
                     runnable = self.db.get_runnable_tasks()
                     if not runnable:
                         break
@@ -2213,6 +2237,8 @@ class BatonChatSession:
                             "status": completed.status.value,
                             "artifact_path": completed.artifact_path,
                         })
+                        if step_idx < max_steps - 1:
+                            time.sleep(1.5)
                     else:
                         break
 

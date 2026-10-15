@@ -738,3 +738,37 @@ def test_start_orchestration_tool_and_slash_commands(chat_session: BatonChatSess
     assert chat_session.handle_slash_command("/toolhelp start_orchestration") is True
 
 
+def test_start_orchestration_and_step_queue_concurrency_lock(chat_session: BatonChatSession):
+    """Verify that start_orchestration and step_queue yield cleanly when another runner is in progress."""
+    t1 = chat_session.db.create_task(title="Running Elsewhere", tier=Tier.SYSTEM_1, task_id="in_prog_t1")
+    t2 = chat_session.db.create_task(title="Queued Task", tier=Tier.SYSTEM_1, task_id="queued_t2")
+
+    # Claim task 1 to simulate TUI / another process running it
+    claimed = chat_session.db.claim_specific_task(t1.task_id)
+    assert claimed is not None
+    assert claimed.status == TaskStatus.IN_PROGRESS
+
+    # step_queue should report busy
+    sq_res = chat_session.execute_tool("step_queue", {})
+    assert sq_res["success"] is False
+    assert "actively running in another process" in sq_res["message"]
+
+    # start_orchestration should pause cleanly
+    so_res = chat_session.execute_tool("start_orchestration", {"max_steps": 3})
+    assert so_res["success"] is False
+    assert "actively running in another process" in so_res["message"]
+
+    # Clear in_progress task
+    chat_session.db.mark_task_completed(t1.task_id, result_payload="Done")
+
+    # Now step_queue succeeds
+    chat_session.orchestrator.system1.execute_task = MagicMock(
+        return_value=("Dossier payload", "artifact.md", 100, 1.0)
+    )
+    sq_res2 = chat_session.execute_tool("step_queue", {})
+    assert sq_res2["success"] is True
+    assert sq_res2["task_id"] == t2.task_id
+
+
+
+
