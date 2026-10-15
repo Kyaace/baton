@@ -6,7 +6,7 @@
 
 - **System 1 (Agile Scout / Copilot):** Fast reasoning and tool-calling model (e.g. Qwen3:14B via Ollama @ ~28 tok/s) equipped with modular tool bundles:
   - `core`: Tool Shelf discovery, on-demand bundle activation, and `tool_help`.
-  - `baton`: Deterministic priority queue, DAG task creation, orchestration (`start_orchestration`), and artifact inspection.
+  - `baton`: Deterministic priority queue, DAG task creation (`add_task`), dependency wiring (`set_task_dependencies`), orchestration (`start_orchestration`), and artifact inspection.
   - `library`: Offline multi-corpus ZIM archive explorer and reader (Wikipedia, Python docs, WikiMed, etc.). Alias: `wikipedia`.
   - `rss`: Offline RSS news monitoring and reader across 12+ tech/science publications with time filtering (`since`). Alias: `newsboat`.
   - `sandbox`: Isolated Python AST verification, REPL evaluation, and pytest test suite execution.
@@ -15,7 +15,7 @@
   - `docs`: Offline API documentation and exact method signatures (Dash/Zeal .docset archives).
   - `vault`: Personal notes and project artifact full-text search (SQLite FTS5 with BM25 ranking).
 - **System 2 (Deep Nocturnal Synthesis):** High-capacity MoE reasoning model (Ornith-1.5-35B-A3B Q4_K_M via `llama-server` with Multi-Token Prediction and hybrid GPU/CPU expert offloading @ ~15.5 tok/s).
-- **Mode A Mutual Exclusion:** Dynamically stops and starts the respective model engines (Ollama for System 1, `llama-server` for System 2) to guarantee 100% exclusive GPU VRAM allocation.
+- **Mode A Mutual Exclusion & Auto-Restoration:** Dynamically stops and starts the respective model engines (Ollama for System 1, `llama-server` for System 2) to guarantee 100% exclusive GPU VRAM allocation, automatically restoring System 1 for the Chat Copilot when orchestration yields.
 - **Cross-Process Concurrency Locking:** Enforces single-task execution across independent processes (TUI Auto-Tick, Chat Copilot `start_orchestration`, CLI) via database-level `IN_PROGRESS` mutual exclusion.
 - **Colibrì / System 2 429 Exponential Backoff:** Automatic retry on HTTP 429 with exponential delays (3s, 6s, 12s) to gracefully absorb brief GPU saturation and prompt cache evictions.
 

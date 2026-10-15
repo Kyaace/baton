@@ -515,6 +515,8 @@ class System1Runner:
                                 self.sandbox_tool.write_file(art_file.name, code_str)
                                 if "filename" not in params:
                                     params["filename"] = art_file.name
+                                if "code" not in params:
+                                    params["code"] = code_str
                                 if "target" not in params and "pytest" in tool_lower:
                                     params["target"] = art_file.name
                                 break

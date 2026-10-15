@@ -48,7 +48,7 @@ def test_tool_schemas_validity():
     """Verify that all function definitions match standard JSON schema specs."""
     assert len(BATON_TOOLS_SCHEMA) >= 20
     assert len(SHELF_TOOLS_SCHEMA) == 4
-    assert len(BATON_QUEUE_TOOLS_SCHEMA) == 10
+    assert len(BATON_QUEUE_TOOLS_SCHEMA) == 11
     assert len(SANDBOX_TOOLS_SCHEMA) == 6
     assert len(SDR_TOOLS_SCHEMA) == 6
 
@@ -67,6 +67,7 @@ def test_tool_schemas_validity():
         "list_tasks",
         "get_task",
         "add_task",
+        "set_task_dependencies",
         "delete_task",
         "retry_failed_tasks",
         "list_artifacts",
@@ -768,6 +769,83 @@ def test_start_orchestration_and_step_queue_concurrency_lock(chat_session: Baton
     sq_res2 = chat_session.execute_tool("step_queue", {})
     assert sq_res2["success"] is True
     assert sq_res2["task_id"] == t2.task_id
+
+
+def test_set_task_dependencies_tool_and_slash_command(chat_session: BatonChatSession):
+    """Verify set_task_dependencies tool and /link slash command with fuzzy resolution."""
+    t1 = chat_session.db.create_task(title="Build Game Engine", tier=Tier.SYSTEM_2, task_id="engine_task")
+    t2 = chat_session.db.create_task(title="Test Game Mechanics", tier=Tier.SYSTEM_1, task_id="test_task")
+    assert t2.status == TaskStatus.READY
+
+    # 1. Wire dependency using task title
+    res = chat_session.execute_tool(
+        "set_task_dependencies",
+        {"task_id": "test_task", "depends_on": ["Build Game Engine"]},
+    )
+    assert res["success"] is True
+    assert res["task_id"] == "test_task"
+    assert res["depends_on"] == ["engine_task"]
+    assert res["status"] == "blocked"
+
+    # Verify in DB
+    updated = chat_session.db.get_task("test_task")
+    assert updated.status == TaskStatus.BLOCKED
+    assert updated.depends_on == ["engine_task"]
+
+    # 2. Complete prerequisite and check status
+    chat_session.db.mark_task_completed("engine_task", result_payload="Done")
+    # Calling update or step re-evaluates
+    chat_session.db.update_task("test_task", depends_on=["engine_task"])
+    updated2 = chat_session.db.get_task("test_task")
+    assert updated2.status == TaskStatus.READY
+
+    # 3. Test slash command /link with ordinal alias
+    t3 = chat_session.db.create_task(title="Deploy Package", tier=Tier.SYSTEM_1, task_id="deploy_task")
+    handled = chat_session.handle_slash_command("/link deploy_task test_task")
+    assert handled is True
+    updated3 = chat_session.db.get_task("deploy_task")
+    assert "test_task" in updated3.depends_on
+
+
+def test_add_task_unresolvable_dependency_protection(chat_session: BatonChatSession):
+    """Verify that add_task returns a clean error on invalid dependency instead of SQL crash."""
+    res = chat_session.execute_tool(
+        "add_task",
+        {
+            "title": "Dependent Task",
+            "tier": "system_1",
+            "prompt": "Test prompt",
+            "depends_on": ["nonexistent_ghost_task_xyz_999"],
+        },
+    )
+    assert res.get("error") is not None
+    assert "Cannot add task: dependency 'nonexistent_ghost_task_xyz_999' does not match" in res["error"]
+
+
+def test_orchestration_restores_system1_engine(chat_session: BatonChatSession):
+    """Verify that start_orchestration and step_queue restore System 1 engine in finally."""
+    t_sys2 = chat_session.db.create_task(title="Synthesis", tier=Tier.SYSTEM_2, task_id="sys2_task")
+
+    # Mock engine manager
+    chat_session.orchestrator.engine_mgr.active_tier = Tier.SYSTEM_1
+    chat_session.orchestrator.system2.synthesize = MagicMock(
+        return_value=("Code payload", "game.py", 150, 2.0)
+    )
+
+    # When step runs, simulate engine switching to Tier.SYSTEM_2
+    def mock_switch(target_tier):
+        chat_session.orchestrator.engine_mgr.active_tier = target_tier
+        return True
+
+    chat_session.orchestrator.engine_mgr.switch_to_tier = MagicMock(side_effect=mock_switch)
+
+    # Execute step_queue
+    res = chat_session.execute_tool("step_queue", {"task_id": "sys2_task"})
+    assert res["success"] is True
+
+    # Engine manager must have been switched back to System 1
+    assert chat_session.orchestrator.engine_mgr.active_tier == Tier.SYSTEM_1
+
 
 
 

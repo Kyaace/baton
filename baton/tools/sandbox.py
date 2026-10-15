@@ -200,17 +200,18 @@ class SandboxTool:
         try:
             target = self._resolve_safe_path(filename)
             if not target.exists() or not target.is_file():
-                return {"error": f"File '{filename}' does not exist in sandbox."}
+                return {"success": False, "error": f"File '{filename}' does not exist in sandbox."}
             content = target.read_text(encoding="utf-8", errors="replace")
             is_truncated = len(content) > max_chars
             return {
+                "success": True,
                 "filename": filename,
                 "content": content[:max_chars],
                 "is_truncated": is_truncated,
                 "total_chars": len(content),
             }
         except Exception as e:
-            return {"error": str(e)}
+            return {"success": False, "error": str(e)}
 
     def list_files(self) -> list[dict[str, Any]]:
         """Lists all files resident in the sandbox."""
@@ -421,6 +422,10 @@ class SandboxTool:
             code = params.get("code", "")
             filename = params.get("filename", "_snippet.py")
             timeout = params.get("timeout")
+            if not code and filename and filename != "_snippet.py":
+                file_res = self.read_file(filename)
+                if file_res.get("success"):
+                    code = file_res.get("content", "")
             if not code:
                 return "Error: Code parameter cannot be empty."
 

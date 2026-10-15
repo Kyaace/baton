@@ -232,6 +232,32 @@ BATON_QUEUE_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "set_task_dependencies",
+            "description": (
+                "Updates or sets the prerequisite task dependencies for an existing task in the queue. "
+                "The task will automatically transition to 'blocked' if any prerequisite is incomplete, "
+                "or 'ready' if all prerequisites are completed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The ID or title of the existing task to update.",
+                    },
+                    "depends_on": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of prerequisite task_ids, titles, or ordinal numbers that must complete before this task can run.",
+                    },
+                },
+                "required": ["task_id", "depends_on"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delete_task",
             "description": "Deletes a task from the Baton queue by task_id.",
             "parameters": {
@@ -1409,6 +1435,14 @@ CURATED_TOOL_CHEATSHEETS: dict[str, dict[str, Any]] = {
             },
         ],
     },
+    "set_task_dependencies": {
+        "summary": "Sets or updates prerequisite task dependencies on an existing task in the queue, automatically synchronizing its readiness state.",
+        "parameters": {
+            "task_id": "(string, required) Target task ID, title, or ordinal index to update.",
+            "depends_on": "(list of strings, required) Task IDs, titles, or ordinal numbers that must complete first. Aliases: dependencies.",
+        },
+        "example": "set_task_dependencies(task_id='task_test_game_in_sandbox', depends_on=['task_setup_pygame_environment'])",
+    },
     "activate_tool_bundle": {
         "summary": "Pulls a tool bundle from the shelf and activates it on your active toolbelt.",
         "parameters": {
@@ -1789,6 +1823,64 @@ class BatonChatSession:
         return tools
 
     # -------------------------------------------------------------------------
+    # Dependency Resolution Helper
+    # -------------------------------------------------------------------------
+
+    def _resolve_dependency_ids(
+        self, raw_deps: list[Any], all_tasks: Optional[list[Task]] = None
+    ) -> tuple[list[str], list[dict[str, str]], list[str]]:
+        """
+        Resolves a list of dependency strings to existing task IDs using:
+        1. Exact task_id match
+        2. Exact title match (case-insensitive)
+        3. Substring title match
+        4. Ordinal patterns: 'task_1', 'task 1', '#1', '1' (mapping to 1-based index of tasks ordered by creation)
+        Returns: (resolved_ids, resolution_notes, unresolvable_items)
+        """
+        if all_tasks is None:
+            all_tasks = self.db.get_all_tasks()
+        task_id_set = {t.task_id for t in all_tasks}
+        title_map = {t.title.strip().lower(): t.task_id for t in all_tasks}
+        sorted_tasks = sorted(all_tasks, key=lambda t: t.created_at)
+
+        resolved_deps: list[str] = []
+        resolution_notes: list[dict[str, str]] = []
+        unresolved: list[str] = []
+
+        for dep in raw_deps:
+            dep_str = str(dep).strip()
+            if not dep_str:
+                continue
+            if dep_str in task_id_set:
+                resolved_deps.append(dep_str)
+            elif dep_str.lower() in title_map:
+                matched_id = title_map[dep_str.lower()]
+                resolved_deps.append(matched_id)
+                resolution_notes.append({"from": dep_str, "from_title": dep_str, "to_id": matched_id, "reason": "exact_title"})
+            else:
+                matched = None
+                for t in all_tasks:
+                    if dep_str.lower() in t.title.lower() or t.title.lower() in dep_str.lower():
+                        matched = t.task_id
+                        resolution_notes.append({"from": dep_str, "from_title": dep_str, "to_id": matched, "reason": "substring_title"})
+                        break
+
+                if not matched:
+                    ord_match = re.search(r"^(?:task[_\s]*)?#?(\d+)$", dep_str, re.IGNORECASE)
+                    if ord_match:
+                        idx = int(ord_match.group(1))
+                        if 1 <= idx <= len(sorted_tasks):
+                            matched = sorted_tasks[idx - 1].task_id
+                            resolution_notes.append({"from": dep_str, "from_title": dep_str, "to_id": matched, "reason": f"ordinal_index_{idx}"})
+
+                if matched:
+                    resolved_deps.append(matched)
+                else:
+                    unresolved.append(dep_str)
+
+        return resolved_deps, resolution_notes, unresolved
+
+    # -------------------------------------------------------------------------
     # Tool Dispatcher
     # -------------------------------------------------------------------------
 
@@ -2045,36 +2137,14 @@ class BatonChatSession:
                 if isinstance(raw_deps, str):
                     raw_deps = [raw_deps] if raw_deps.strip() else []
 
-                # Fuzzy resolution of dependencies:
-                # If dep is not an existing task_id, check if it matches an existing task title
-                resolved_deps = []
-                resolution_notes = []
                 all_tasks = self.db.get_all_tasks()
-                task_id_set = {t.task_id for t in all_tasks}
-                title_map = {t.title.strip().lower(): t.task_id for t in all_tasks}
-
-                for dep in raw_deps:
-                    dep_str = str(dep).strip()
-                    if not dep_str:
-                        continue
-                    if dep_str in task_id_set:
-                        resolved_deps.append(dep_str)
-                    elif dep_str.lower() in title_map:
-                        matched_id = title_map[dep_str.lower()]
-                        resolved_deps.append(matched_id)
-                        resolution_notes.append({"from_title": dep_str, "to_id": matched_id})
-                    else:
-                        # Partial/contains match
-                        matched = None
-                        for t in all_tasks:
-                            if dep_str.lower() in t.title.lower() or t.title.lower() in dep_str.lower():
-                                matched = t.task_id
-                                resolution_notes.append({"from_title": dep_str, "to_id": matched})
-                                break
-                        if matched:
-                            resolved_deps.append(matched)
-                        else:
-                            resolved_deps.append(dep_str)
+                resolved_deps, resolution_notes, unresolved = self._resolve_dependency_ids(raw_deps, all_tasks)
+                if unresolved:
+                    available_ids = [t.task_id for t in all_tasks[:5]]
+                    return {
+                        "error": f"Cannot add task: dependency '{unresolved[0]}' does not match any existing task. Available tasks: {available_ids}",
+                        "tip": "Use list_tasks to see valid task_ids, or use exact task titles.",
+                    }
 
                 task_type = args.get("task_type")
                 tool_name = args.get("tool_name") or args.get("tool")
@@ -2105,6 +2175,66 @@ class BatonChatSession:
                 if resolution_notes:
                     res_task["resolved_dependencies"] = resolution_notes
                 return res_task
+
+            elif name in ("set_task_dependencies", "link_dependencies", "add_dependency"):
+                task_id_raw = (args.get("task_id") or args.get("task") or "").strip()
+                if not task_id_raw:
+                    return {
+                        "error": "Missing required parameter 'task_id'. Usage: set_task_dependencies(task_id='...', depends_on=['...'])",
+                        "tip": "Call tool_help(tool_name='set_task_dependencies') for usage examples.",
+                    }
+
+                raw_deps = args.get("depends_on") or args.get("dependencies") or []
+                if isinstance(raw_deps, str):
+                    raw_deps = [raw_deps] if raw_deps.strip() else []
+
+                all_tasks = self.db.get_all_tasks()
+                task_id_set = {t.task_id for t in all_tasks}
+
+                target_task_id = None
+                if task_id_raw in task_id_set:
+                    target_task_id = task_id_raw
+                else:
+                    for t in all_tasks:
+                        if task_id_raw.lower() == t.title.lower() or task_id_raw.lower() in t.title.lower():
+                            target_task_id = t.task_id
+                            break
+                    if not target_task_id:
+                        ord_match = re.search(r"^(?:task[_\s]*)?#?(\d+)$", task_id_raw, re.IGNORECASE)
+                        if ord_match:
+                            idx = int(ord_match.group(1))
+                            sorted_tasks = sorted(all_tasks, key=lambda t: t.created_at)
+                            if 1 <= idx <= len(sorted_tasks):
+                                target_task_id = sorted_tasks[idx - 1].task_id
+
+                if not target_task_id:
+                    return {
+                        "error": f"Task '{task_id_raw}' not found. Available tasks: {[t.task_id for t in all_tasks[:5]]}",
+                        "tip": "Use list_tasks to see valid task_ids.",
+                    }
+
+                resolved_deps, resolution_notes, unresolved = self._resolve_dependency_ids(raw_deps, all_tasks)
+                if unresolved:
+                    return {
+                        "error": f"Cannot set dependencies: dependency '{unresolved[0]}' does not match any existing task. Available tasks: {[t.task_id for t in all_tasks[:5]]}",
+                        "tip": "Use list_tasks to see valid task_ids.",
+                    }
+
+                self.db.update_task(task_id=target_task_id, depends_on=resolved_deps)
+                updated = self.db.get_task(target_task_id)
+                if not updated:
+                    return {"error": f"Failed to retrieve updated task '{target_task_id}'."}
+
+                res_dep: dict[str, Any] = {
+                    "success": True,
+                    "task_id": updated.task_id,
+                    "title": updated.title,
+                    "status": updated.status.value,
+                    "depends_on": updated.depends_on,
+                }
+                if resolution_notes:
+                    res_dep["resolved_dependencies"] = resolution_notes
+                return res_dep
 
             elif name == "delete_task":
                 task_id = args["task_id"]
@@ -2181,87 +2311,103 @@ class BatonChatSession:
 
             elif name == "step_queue":
                 task_id = args.get("task_id")
-                completed_task = self.orchestrator.step(task_id=task_id)
-                if completed_task:
-                    return {
-                        "success": True,
-                        "task_id": completed_task.task_id,
-                        "title": completed_task.title,
-                        "status": completed_task.status.value,
-                        "summary": completed_task.result_payload[:300] if completed_task.result_payload else None,
-                        "artifact_path": completed_task.artifact_path,
-                    }
-                else:
-                    in_prog = self.db.get_in_progress_tasks()
-                    msg = (
-                        f"Cannot step: Task '{in_prog[0].task_id}' is actively running in another process."
-                        if in_prog
-                        else "No runnable task found in READY state to execute."
-                    )
-                    return {
-                        "success": False,
-                        "message": msg,
-                    }
+                try:
+                    completed_task = self.orchestrator.step(task_id=task_id)
+                    if completed_task:
+                        return {
+                            "success": True,
+                            "task_id": completed_task.task_id,
+                            "title": completed_task.title,
+                            "status": completed_task.status.value,
+                            "summary": completed_task.result_payload[:300] if completed_task.result_payload else None,
+                            "artifact_path": completed_task.artifact_path,
+                        }
+                    else:
+                        in_prog = self.db.get_in_progress_tasks()
+                        msg = (
+                            f"Cannot step: Task '{in_prog[0].task_id}' is actively running in another process."
+                            if in_prog
+                            else "No runnable task found in READY state to execute."
+                        )
+                        return {
+                            "success": False,
+                            "message": msg,
+                        }
+                finally:
+                    if (
+                        getattr(self.orchestrator, "engine_mgr", None)
+                        and self.orchestrator.engine_mgr.active_tier == Tier.SYSTEM_2
+                    ):
+                        logger.info("Restoring System 1 (Ollama) engine for Chat Copilot...")
+                        self.orchestrator.engine_mgr.switch_to_tier(Tier.SYSTEM_1)
 
             elif name == "start_orchestration":
                 max_steps = int(args.get("max_steps", 5))
                 executed_tasks = []
-                for step_idx in range(max_steps):
-                    in_prog = self.db.get_in_progress_tasks()
-                    if in_prog:
-                        all_t = self.db.get_all_tasks()
-                        status_counts: dict[str, int] = {}
-                        for t in all_t:
-                            status_counts[t.status.value] = status_counts.get(t.status.value, 0) + 1
-                        remaining_ready = status_counts.get("ready", 0)
-                        remaining_blocked = status_counts.get("blocked", 0)
-                        return {
-                            "success": False,
-                            "steps_executed": len(executed_tasks),
-                            "executed_tasks": executed_tasks,
-                            "queue_status": status_counts,
-                            "remaining_ready": remaining_ready,
-                            "remaining_blocked": remaining_blocked,
-                            "message": f"Orchestration paused: Task '{in_prog[0].task_id}' is actively running in another process.",
-                        }
+                try:
+                    for step_idx in range(max_steps):
+                        in_prog = self.db.get_in_progress_tasks()
+                        if in_prog:
+                            all_t = self.db.get_all_tasks()
+                            status_counts: dict[str, int] = {}
+                            for t in all_t:
+                                status_counts[t.status.value] = status_counts.get(t.status.value, 0) + 1
+                            remaining_ready = status_counts.get("ready", 0)
+                            remaining_blocked = status_counts.get("blocked", 0)
+                            return {
+                                "success": False,
+                                "steps_executed": len(executed_tasks),
+                                "executed_tasks": executed_tasks,
+                                "queue_status": status_counts,
+                                "remaining_ready": remaining_ready,
+                                "remaining_blocked": remaining_blocked,
+                                "message": f"Orchestration paused: Task '{in_prog[0].task_id}' is actively running in another process.",
+                            }
 
-                    runnable = self.db.get_runnable_tasks()
-                    if not runnable:
-                        break
-                    completed = self.orchestrator.step()
-                    if completed:
-                        executed_tasks.append({
-                            "task_id": completed.task_id,
-                            "title": completed.title,
-                            "tier": completed.tier.value,
-                            "status": completed.status.value,
-                            "artifact_path": completed.artifact_path,
-                        })
-                        if step_idx < max_steps - 1:
-                            time.sleep(1.5)
-                    else:
-                        break
+                        runnable = self.db.get_runnable_tasks()
+                        if not runnable:
+                            break
+                        completed = self.orchestrator.step()
+                        if completed:
+                            executed_tasks.append({
+                                "task_id": completed.task_id,
+                                "title": completed.title,
+                                "tier": completed.tier.value,
+                                "status": completed.status.value,
+                                "artifact_path": completed.artifact_path,
+                            })
+                            if step_idx < max_steps - 1:
+                                time.sleep(1.5)
+                        else:
+                            break
 
-                all_t = self.db.get_all_tasks()
-                status_counts: dict[str, int] = {}
-                for t in all_t:
-                    status_counts[t.status.value] = status_counts.get(t.status.value, 0) + 1
-                remaining_ready = status_counts.get("ready", 0)
-                remaining_blocked = status_counts.get("blocked", 0)
+                    all_t = self.db.get_all_tasks()
+                    status_counts = {}
+                    for t in all_t:
+                        status_counts[t.status.value] = status_counts.get(t.status.value, 0) + 1
+                    remaining_ready = status_counts.get("ready", 0)
+                    remaining_blocked = status_counts.get("blocked", 0)
 
-                return {
-                    "success": True,
-                    "steps_executed": len(executed_tasks),
-                    "executed_tasks": executed_tasks,
-                    "queue_status": status_counts,
-                    "remaining_ready": remaining_ready,
-                    "remaining_blocked": remaining_blocked,
-                    "message": (
-                        f"Executed {len(executed_tasks)} task(s). {remaining_ready} ready, {remaining_blocked} blocked in queue."
-                        if executed_tasks
-                        else "No runnable tasks found in READY state."
-                    ),
-                }
+                    return {
+                        "success": True,
+                        "steps_executed": len(executed_tasks),
+                        "executed_tasks": executed_tasks,
+                        "queue_status": status_counts,
+                        "remaining_ready": remaining_ready,
+                        "remaining_blocked": remaining_blocked,
+                        "message": (
+                            f"Executed {len(executed_tasks)} task(s). {remaining_ready} ready, {remaining_blocked} blocked in queue."
+                            if executed_tasks
+                            else "No runnable tasks found in READY state."
+                        ),
+                    }
+                finally:
+                    if (
+                        getattr(self.orchestrator, "engine_mgr", None)
+                        and self.orchestrator.engine_mgr.active_tier == Tier.SYSTEM_2
+                    ):
+                        logger.info("Restoring System 1 (Ollama) engine for Chat Copilot...")
+                        self.orchestrator.engine_mgr.switch_to_tier(Tier.SYSTEM_1)
 
             # Wikipedia Bundle Tools ('wikipedia' / 'library')
             elif name == "wiki_search":
@@ -2521,6 +2667,14 @@ class BatonChatSession:
 
         while turn_count < max_turns:
             turn_count += 1
+            # Ensure System 1 (Ollama) engine is active for Chat Copilot
+            if (
+                getattr(self.orchestrator, "engine_mgr", None)
+                and self.orchestrator.engine_mgr.active_tier == Tier.SYSTEM_2
+            ):
+                logger.info("Chat Copilot active: transitioning engine back to System 1 (Ollama)...")
+                self.orchestrator.engine_mgr.switch_to_tier(Tier.SYSTEM_1)
+
             # Retrieve currently active tools based on the shelf state
             active_tools = self.get_active_tools_schema()
 
@@ -2534,17 +2688,30 @@ class BatonChatSession:
                 },
             }
 
+            data = None
             try:
                 res = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=120)
                 res.raise_for_status()
                 data = res.json()
             except requests.exceptions.ConnectionError:
-                err_msg = (
-                    "Could not connect to Ollama at http://127.0.0.1:11434. "
-                    "Make sure Ollama is running (run '.\\scripts\\start_ollama.bat')."
-                )
-                self._log_event("ERROR", err_msg)
-                return err_msg
+                # Self-healing: if Ollama was stopped or crashed, try starting it once
+                if getattr(self.orchestrator, "engine_mgr", None):
+                    logger.warning("Ollama connection failed. Attempting to start Ollama...")
+                    started = self.orchestrator.engine_mgr.start_ollama(timeout_sec=10)
+                    if started:
+                        try:
+                            res = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=120)
+                            res.raise_for_status()
+                            data = res.json()
+                        except Exception:
+                            data = None
+                if not data:
+                    err_msg = (
+                        "Could not connect to Ollama at http://127.0.0.1:11434. "
+                        "Make sure Ollama is running (run '.\\scripts\\start_ollama.bat')."
+                    )
+                    self._log_event("ERROR", err_msg)
+                    return err_msg
             except Exception as e:
                 err_msg = f"Error communicating with Ollama: {e}"
                 self._log_event("ERROR", err_msg)
@@ -2708,6 +2875,20 @@ class BatonChatSession:
                 console.print(f"[dim]{res.get('message', '')}[/]")
             else:
                 console.print(f"[yellow]{res.get('message', 'No runnable tasks in READY state.')}[/]")
+            return True
+
+        elif cmd in ("/link", "/depend"):
+            parts = arg.split(maxsplit=1)
+            if len(parts) < 2:
+                console.print("[yellow]Usage: /link <task_id> <dep_id_1,dep_id_2> (e.g. /link task_test task_code)[/]")
+            else:
+                target_id = parts[0].strip()
+                deps_raw = [d.strip() for d in parts[1].replace(",", " ").split() if d.strip()]
+                res = self.execute_tool("set_task_dependencies", {"task_id": target_id, "depends_on": deps_raw})
+                if res.get("success"):
+                    console.print(f"[green]✓ Updated dependencies for [bold]{res['task_id']}[/]: {res.get('depends_on')} (status: {res.get('status')})[/]")
+                else:
+                    console.print(f"[red]Error: {res.get('error')}[/]")
             return True
 
         elif cmd in ("/shelf", "/bundles"):
@@ -2939,6 +3120,7 @@ class BatonChatSession:
         table.add_row("/shelf or /bundles", "Inspect tool shelf and active toolbelt bundles")
         table.add_row("/bundle <name>", "Activate/deactivate bundle (e.g. /bundle baton, /bundle library, /bundle sandbox, /bundle newsboat, /bundle docs, /bundle vault, /bundle all)")
         table.add_row("/tasks [status]", "Instantly view task table (filter by ready, blocked, completed, failed)")
+        table.add_row("/link <task_id> <deps>", "Wire prerequisite dependencies to a task (e.g. /link task_test task_code)")
         table.add_row("/notes", "List active ephemeral scratchpad notes on desk with IDs, char counts, and time remaining")
         table.add_row("/note <id>", "Read full text of scratchpad note by ID (e.g. /note 1)")
         table.add_row("/dismiss <id>", "Dismiss scratchpad note from desk immediately")

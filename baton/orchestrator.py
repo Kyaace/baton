@@ -147,6 +147,13 @@ class Orchestrator:
         prog_file = self.progress_dir / f"{task_id}.json"
         return TaskProgress.load_from_file(prog_file)
 
+    def _safe_save_progress(self, progress: TaskProgress, task_id: str) -> None:
+        """Safely saves progress file, catching and logging any transient I/O or lock errors."""
+        try:
+            progress.save_to_file(self.progress_dir / f"{task_id}.json")
+        except Exception as err:
+            logger.debug("Non-fatal progress save error for task '%s': %s", task_id, err)
+
     def delete_task(self, task_id: str) -> bool:
         """Deletes a task from the database and purges active progress records."""
         prog_file = self.progress_dir / f"{task_id}.json"
@@ -208,7 +215,7 @@ class Orchestrator:
                 prog = self.active_progress[t.task_id]
                 prog.is_completed = True
                 prog.error = "Stopped by user"
-                prog.save_to_file(self.progress_dir / f"{t.task_id}.json")
+                self._safe_save_progress(prog, t.task_id)
             if not stopped_id:
                 stopped_id = t.task_id
 
@@ -335,13 +342,16 @@ class Orchestrator:
             started_at=time.time(),
         )
         self.active_progress[task.task_id] = prog
-        prog.save_to_file(self.progress_dir / f"{task.task_id}.json")
+        self._safe_save_progress(prog, task.task_id)
 
         def _on_progress(p: TaskProgress) -> None:
             self.active_progress[task.task_id] = p
-            p.save_to_file(self.progress_dir / f"{task.task_id}.json")
+            self._safe_save_progress(p, task.task_id)
             if self.on_progress_update:
-                self.on_progress_update(p)
+                try:
+                    self.on_progress_update(p)
+                except Exception as err:
+                    logger.debug("Non-fatal error in on_progress_update callback: %s", err)
 
         try:
             if task.tier == Tier.SYSTEM_1:
@@ -388,7 +398,7 @@ class Orchestrator:
             active_prog = self.active_progress.get(task.task_id, prog)
             active_prog.is_completed = True
             active_prog.tokens_generated = tokens
-            active_prog.save_to_file(self.progress_dir / f"{task.task_id}.json")
+            self._safe_save_progress(active_prog, task.task_id)
 
             self.db.mark_task_completed(
                 task_id=task.task_id,
@@ -406,7 +416,7 @@ class Orchestrator:
             active_prog = self.active_progress.get(task.task_id, prog)
             active_prog.is_completed = True
             active_prog.error = str(e)
-            active_prog.save_to_file(self.progress_dir / f"{task.task_id}.json")
+            self._safe_save_progress(active_prog, task.task_id)
             self.db.mark_task_failed(task.task_id, str(e))
             task.status = TaskStatus.FAILED
             task.error_message = str(e)
@@ -420,7 +430,7 @@ class Orchestrator:
             active_prog = self.active_progress.get(task.task_id, prog)
             active_prog.is_completed = True
             active_prog.error = "Stopped by user"
-            active_prog.save_to_file(self.progress_dir / f"{task.task_id}.json")
+            self._safe_save_progress(active_prog, task.task_id)
             self.db.mark_task_failed(task.task_id, "Stopped by user")
             task.status = TaskStatus.FAILED
             task.error_message = "Stopped by user"
@@ -430,7 +440,7 @@ class Orchestrator:
             active_prog = self.active_progress.get(task.task_id, prog)
             active_prog.is_completed = True
             active_prog.error = str(e)
-            active_prog.save_to_file(self.progress_dir / f"{task.task_id}.json")
+            self._safe_save_progress(active_prog, task.task_id)
             self.db.mark_task_failed(task.task_id, str(e))
             task.status = TaskStatus.FAILED
             task.error_message = str(e)

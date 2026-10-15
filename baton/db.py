@@ -501,7 +501,16 @@ class Database:
             if depends_on is not None:
                 deps_clean = [d for d in depends_on if d != task_id]
                 conn.execute("DELETE FROM task_dependencies WHERE task_id = ?", (task_id,))
-                for dep_id in deps_clean:
+                valid_clean: list[str] = []
+                if deps_clean:
+                    placeholders = ",".join("?" for _ in deps_clean)
+                    existing_rows = conn.execute(
+                        f"SELECT task_id FROM tasks WHERE task_id IN ({placeholders})", deps_clean
+                    ).fetchall()
+                    existing_set = {r["task_id"] for r in existing_rows}
+                    valid_clean = [d for d in deps_clean if d in existing_set]
+
+                for dep_id in valid_clean:
                     conn.execute(
                         "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)",
                         (task_id, dep_id),
@@ -568,14 +577,15 @@ class Database:
         now = datetime.now()
 
         with self.get_connection() as conn:
+            valid_deps: list[str] = []
             unmet = 0
             if deps:
                 placeholders = ",".join("?" for _ in deps)
-                row = conn.execute(
-                    f"SELECT COUNT(*) as count FROM tasks WHERE task_id IN ({placeholders}) AND status != 'completed'",
-                    deps,
-                ).fetchone()
-                unmet = row["count"] if row else 0
+                existing_rows = conn.execute(
+                    f"SELECT task_id, status FROM tasks WHERE task_id IN ({placeholders})", deps
+                ).fetchall()
+                valid_deps = [r["task_id"] for r in existing_rows]
+                unmet = sum(1 for r in existing_rows if r["status"] != "completed")
 
             initial_status = TaskStatus.BLOCKED if unmet > 0 else TaskStatus.READY
             params_json = json.dumps(tool_params) if tool_params else None
@@ -604,7 +614,7 @@ class Database:
                 ),
             )
 
-            for dep_id in deps:
+            for dep_id in valid_deps:
                 conn.execute(
                     "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)",
                     (task_id, dep_id),
@@ -620,7 +630,7 @@ class Database:
             prompt_template=prompt_template,
             tool_name=tool_name,
             tool_params=tool_params,
-            depends_on=deps,
+            depends_on=valid_deps,
             priority=priority,
             scheduled_at=scheduled_at,
             note_id=note_id,

@@ -451,5 +451,26 @@ def test_system2_prompt_cache_flag_and_header(tmp_path: Path):
         assert kwargs_nocache["headers"]["X-Baton-Cache-Prefix"] == "bypass"
 
 
+def test_task_progress_save_resilient_to_replace_error(tmp_path: Path):
+    """Verify that save_to_file gracefully falls back to direct write when Path.replace fails (Windows lock)."""
+    prog_file = tmp_path / "locked_task.json"
+    p = TaskProgress(
+        task_id="task_locked",
+        tier=Tier.SYSTEM_2,
+        started_at=time.time(),
+        tokens_generated=42,
+    )
+
+    with patch.object(Path, "replace", side_effect=PermissionError("[WinError 5] Access is denied")):
+        p.save_to_file(prog_file)
+
+    assert prog_file.exists()
+    loaded = TaskProgress.load_from_file(prog_file)
+    assert loaded is not None
+    assert loaded.task_id == "task_locked"
+    assert loaded.tokens_generated == 42
+
+
+
 
 

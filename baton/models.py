@@ -343,14 +343,48 @@ class TaskProgress(BaseModel):
         return format_duration(self.elapsed_seconds)
 
     def save_to_file(self, path: Path) -> None:
-        """Atomically saves progress state to a JSON file."""
+        """Atomically saves progress state to a JSON file with Windows file-lock resilience."""
         import json
+        import time
         from pathlib import Path
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")
-        tmp.write_text(self.model_dump_json(indent=2), encoding="utf-8")
-        tmp.replace(p)
+        payload = self.model_dump_json(indent=2)
+
+        # Write to temporary file first
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+        except Exception:
+            pass
+
+        # Attempt atomic replace with retries for Windows file locks
+        replaced = False
+        if tmp.exists():
+            for attempt in range(5):
+                try:
+                    tmp.replace(p)
+                    replaced = True
+                    break
+                except (PermissionError, OSError):
+                    time.sleep(0.02 * (attempt + 1))
+
+        # Fallback: if replace failed (e.g. concurrent reader on Windows), attempt direct write
+        if not replaced:
+            for attempt in range(3):
+                try:
+                    p.write_text(payload, encoding="utf-8")
+                    replaced = True
+                    break
+                except (PermissionError, OSError):
+                    time.sleep(0.02 * (attempt + 1))
+
+        # Clean up stale temp file if still present
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
 
     @classmethod
     def load_from_file(cls, path: Path) -> Optional[TaskProgress]:

@@ -456,3 +456,15 @@ def test_system1_executes_task_with_structured_json(tmp_path: Path):
         assert "sin(alt)" in content
 
 
+def test_python_eval_reads_staged_file_when_code_empty(tmp_path: Path):
+    """Verify that python_eval reads code from workspace file when code argument is omitted."""
+    from baton.tools.sandbox import SandboxTool
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox_ws")
+    sandbox.write_file("game.py", "print('PONG_INITIALIZED')\n")
+
+    res = sandbox.execute("python_eval", {"filename": "game.py"})
+    assert "PASSED (Code 0)" in res
+    assert "PONG_INITIALIZED" in res
+
+
+
