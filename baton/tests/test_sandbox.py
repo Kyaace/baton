@@ -467,4 +467,67 @@ def test_python_eval_reads_staged_file_when_code_empty(tmp_path: Path):
     assert "PONG_INITIALIZED" in res
 
 
+def test_system1_recon_autonomous_recovery_on_typo_or_miss(tmp_path: Path):
+    """Verify that System 1 autonomously recovers from a recon tool miss (e.g. misspelled article)."""
+    import json
+    from unittest.mock import MagicMock, patch
+    from baton.models import Task, TaskType, Tier
+    from baton.system1 import System1Runner
+
+    # 1. Mock zim_tool execution: first returns miss, second (recovered) returns article
+    def mock_zim_exec(tool_name, params):
+        title = params.get("title") or params.get("page_title")
+        if title == "Fall Equanox":
+            return "Section '' in article 'Fall Equanox' was empty or not found in [wikipedia]."
+        elif title == "Autumnal equinox":
+            return "# Autumnal equinox (Lead Section)\nThe autumnal equinox is an astronomical event..."
+        return "Not found"
+
+    mock_zim = MagicMock()
+    mock_zim.execute.side_effect = mock_zim_exec
+    mock_zim.reader.suggest_titles.return_value = ["Autumnal equinox", "Equinox"]
+
+    runner = System1Runner(artifacts_dir=tmp_path, zim_tool=mock_zim, structured_output=True)
+    task = Task(
+        task_id="recon_fall_equanox",
+        job_id="job_equinox",
+        title="Fall Equanox Wikipedia Recon",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_RECON,
+        tool_name="wiki_read_section",
+        tool_params={"page_title": "Fall Equanox"},
+        prompt_template="Extract detailed information about Fall Equanox from Wikipedia.",
+    )
+
+    # 2. Mock generate calls:
+    # 1st call: recovery prompt -> emits JSON repair action
+    # 2nd call: dossier distillation prompt -> emits structured briefing dossier
+    recovery_json = json.dumps({
+        "diagnosis": "Typo in 'Equanox'. Closest canonical Wikipedia article is 'Autumnal equinox'.",
+        "tool": "wiki_read_lead",
+        "params": {"title": "Autumnal equinox"},
+    })
+    dossier_json = json.dumps({
+        "summary": "Autumnal equinox occurs in September in the Northern Hemisphere.",
+        "core_facts": ["Occurs around September 22-23", "Sun crosses the celestial equator"],
+        "equations_or_apis": ["delta = 23.45 * sin(360 * (284 + N)/365)"],
+        "open_questions": [],
+        "source_citations": ["Wikipedia: Autumnal equinox"],
+    })
+
+    with patch.object(runner, "generate", side_effect=[
+        {"response": recovery_json, "tokens_generated": 40, "elapsed_seconds": 0.5},
+        {"response": dossier_json, "tokens_generated": 100, "elapsed_seconds": 1.0},
+    ]) as mock_gen:
+        summary, art_path, tokens, elapsed = runner.execute_task(task)
+
+        assert mock_gen.call_count == 2
+        assert "## Summary: Autumnal equinox" in summary
+        assert art_path is not None
+        content = Path(art_path).read_text(encoding="utf-8")
+        assert "- Occurs around September 22-23" in content
+        assert "delta = 23.45 * sin" in content
+
+
+
 

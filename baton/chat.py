@@ -33,7 +33,7 @@ from rich.table import Table
 
 from baton.db import Database
 from baton.engine_manager import EngineManager
-from baton.models import Task, TaskStatus, Tier
+from baton.models import Task, TaskStatus, TaskType, Tier
 from baton.orchestrator import Orchestrator
 from baton.tools.docs_tool import DocsTool
 from baton.tools.newsboat import NewsboatTool
@@ -325,7 +325,11 @@ BATON_QUEUE_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "properties": {
                     "max_steps": {
                         "type": "integer",
-                        "description": "Maximum number of ready tasks to execute in this run (default: 5).",
+                        "description": (
+                            "Maximum number of ready tasks to execute in this run (default: 5). "
+                            "Do NOT pass max_steps=1 when running synthesis or multi-step tasks; "
+                            "leave unspecified or set to 5+ to allow chained tasks and automated downstream verification passes to complete."
+                        ),
                     },
                 },
             },
@@ -1620,9 +1624,12 @@ Your Roles & Capabilities:
    - Create 'system_2' tasks for deep mathematical derivations, multi-file code synthesis, or complete modules.
    - Set up dependencies using `depends_on` so System 2 tasks automatically receive upstream dossiers.
 5. Start orchestration when ready: call `start_orchestration()` to execute queued tasks without waiting.
+   - Do NOT pass max_steps=1 when running synthesis or pipeline tasks. Omit max_steps or use the default (5) so that automatically injected verification passes (fast_verify) complete in the same run.
 
 Guidelines:
 - When the user requests task creation or project execution, call the appropriate tools immediately.
+- Keep task prompts focused, objective, and unambiguous. Do NOT invent artificial mathematical formulas, extra constraints, or conflicting edge cases unless explicitly requested by the user.
+- For System 2 code synthesis tasks, always specify the target Python filename in tool_params: {"output_artifact": "filename.py"}.
 - The 'core' and 'baton' bundles are active on your toolbelt by default.
 - If you are ever unsure of a tool's parameters or usage, call `tool_help(tool_name=...)`.
 - Keep your conversational answers crisp, clear, and proactive.
@@ -2285,18 +2292,37 @@ class BatonChatSession:
                 task_id = args.get("task_id")
                 file_path = args.get("file_path")
                 text = ""
+                is_empty_file = False
+                task = None
 
                 if task_id:
+                    task = self.db.get_task(task_id)
                     text = self.orchestrator.get_task_artifact_text(task_id) or ""
                     if not text:
-                        task = self.db.get_task(task_id)
-                        if task and task.result_payload:
+                        if task and task.artifact_path and Path(task.artifact_path).exists():
+                            if Path(task.artifact_path).stat().st_size == 0:
+                                is_empty_file = True
+                        if task and task.result_payload and not is_empty_file:
                             text = task.result_payload
 
                 if not text and file_path:
                     p = Path(file_path)
                     if p.exists() and p.is_file():
                         text = p.read_text(encoding="utf-8", errors="replace")
+                        if not text:
+                            is_empty_file = True
+
+                if is_empty_file and not text:
+                    thinking_msg = ""
+                    if task_id:
+                        th_path = Path("baton/artifacts/synthesis") / f"{task_id}_thinking.md"
+                        if th_path.exists():
+                            thinking_msg = f" However, reasoning monologue was recorded in '{th_path}'."
+                    return {
+                        "content": f"Artifact file '{task.artifact_path if task else file_path}' exists but contains 0 bytes (empty output).{thinking_msg}",
+                        "is_truncated": False,
+                        "total_chars": 0,
+                    }
 
                 if not text:
                     return {"error": f"No artifact text found for task_id={task_id} / file_path={file_path}"}
@@ -2395,6 +2421,27 @@ class BatonChatSession:
                                 time.sleep(1.5)
                         else:
                             break
+
+                    # If the last executed task was System 2 and auto-injected a downstream FAST_VERIFY task,
+                    # automatically execute that verification task so the verification pass is not left abandoned.
+                    if executed_tasks and executed_tasks[-1].get("tier") == "system_2":
+                        runnable = self.db.get_runnable_tasks()
+                        last_id = executed_tasks[-1]["task_id"]
+                        verify_tasks = [
+                            t for t in runnable
+                            if t.task_type == TaskType.FAST_VERIFY and last_id in t.depends_on
+                        ]
+                        if verify_tasks:
+                            time.sleep(1.5)
+                            v_comp = self.orchestrator.step(task_id=verify_tasks[0].task_id)
+                            if v_comp:
+                                executed_tasks.append({
+                                    "task_id": v_comp.task_id,
+                                    "title": v_comp.title,
+                                    "tier": v_comp.tier.value,
+                                    "status": v_comp.status.value,
+                                    "artifact_path": v_comp.artifact_path,
+                                })
 
                     all_t = self.db.get_all_tasks()
                     status_counts = {}

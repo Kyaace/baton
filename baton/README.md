@@ -8,10 +8,10 @@
 
 Baton resolves the hardware and cognitive trade-off between fast local copilots and frontier MoE models on a single consumer desktop (Intel i5-13500, 128 GB RAM, NVIDIA RTX 3060 12GB):
 
-* **System 1 (Fast Recon Scout & Verifier):** Powered by **Qwen3:14B** via Ollama (~14–33 tok/s). Rapidly navigates offline knowledge databases (Kiwix Wikipedia ZIM) and synthesizes multi-megabyte datasets into **300-word structured briefing dossiers**.
-* **System 2 (Deep Macro-Planner & Overnight Synthesizer):** Powered by **DeepSeek-V4-Flash (284B MoE)** via Colibrì (~0.60–0.81 tok/s). Decomposes projects into Task DAGs and executes long, unattended synthesis runs overnight. Tool-blind to protect stability and context budgets.
+* **System 1 (Fast Recon Scout & Verifier):** Powered by **Qwen3:14B** via `llama-server` router or Ollama (~28–33 tok/s). Rapidly navigates offline knowledge databases (Kiwix Wikipedia ZIM) with autonomous typo/miss self-recovery, and synthesizes multi-megabyte datasets into **300-word structured briefing dossiers**.
+* **System 2 (Deep Macro-Planner & Overnight Synthesizer):** Powered by **Ornith-1.5-35B-A3B MoE** (or DeepSeek-V4-Flash) via `llama-server` (~15.5 tok/s). Employs decisive `<think>` reasoning protocols, automatic reasoning code salvage fallbacks, and multi-turn continuation recovery. Tool-blind to protect stability and context budgets.
 * **The Deterministic Mediator:** Pure Python SQLite-backed priority queue (`baton.db`). Manages DAG state transitions (`blocked` $\rightarrow$ `ready` $\rightarrow$ `in_progress` $\rightarrow$ `completed`), bounds context budgets to $\le$ 1,200 tokens, and records production artifacts.
-* **Mode A Mutual Exclusion:** Guarantees that only one engine actively holds the RTX 3060's 12GB VRAM at a time. Stops Colibrì before launching Ollama, and shuts down Ollama before launching Colibrì.
+* **Multi-Model Router & VRAM Envelope:** Single `llama-server` instance on port 8080 dynamically pages models in/out of the RTX 3060 12GB VRAM using Q8_0 KV quantization and single-slot allocations, preventing PCIe paging stalls. Mode A mutual exclusion remains active as a standalone fallback.
 
 ---
 
@@ -112,12 +112,16 @@ Baton resolves the hardware and cognitive trade-off between fast local copilots 
 
 ## 3. Resilience & Long-Run Safeguards
 
+* **Autonomous Recon Self-Recovery Loop:** System 1 automatically catches tool lookup misses, empty results, or typos (`_is_recon_miss`), queries ZIM suggestion indexes, and uses structured JSON self-repair to diagnose and re-dispatch the corrected tool and parameters without aborting the task.
+* **System 2 Decisive Reasoning & Code Salvage Fallback:** Prompts instruct decisive planning in `<think>` (<1000 tokens) and immediate conclusion with `</think>`. If generation hits token limits before closing the reasoning block, the engine automatically extracts and salvages code blocks from the `reasoning_content` monologue.
+* **Automated Downstream Verification Draining:** `start_orchestration` checks for downstream `FAST_VERIFY` tasks queued immediately after System 2 synthesis and executes them in the same run, preventing verification passes from being stranded even when `max_steps=1`.
+* **Empty File Protection:** `read_artifact` detects 0-byte output files and alerts the user/agent, linking directly to `_thinking.md` when reasoning was captured.
 * **Global Concurrency Exclusion & Cross-Process Locking:** Guarantees single-task execution across independent processes (TUI Auto-Tick, Chat Copilot `start_orchestration`, CLI). Prevents multiple tasks from entering `IN_PROGRESS` simultaneously and colliding on single-GPU inference backends.
-* **HTTP 429 Exponential Backoff:** Wraps System 2 Colibrì generation requests with automatic backoff (up to 3 retries over 3s, 6s, 12s) to gracefully absorb brief engine saturation or prompt cache evictions without task failure.
-* **Inter-Step Orchestration Cooldown:** Enforces a 1.5s inter-task delay during `start_orchestration` batch runs to allow local LLM servers (Colibrì / Ollama) to release sockets, clear attention caches, and reset VRAM slots cleanly.
+* **HTTP 429 Exponential Backoff:** Wraps System 2 generation requests with automatic backoff (up to 3 retries over 3s, 6s, 12s) to gracefully absorb brief engine saturation or prompt cache evictions without task failure.
+* **Inter-Step Orchestration Cooldown:** Enforces a 1.5s inter-task delay during `start_orchestration` batch runs to allow local LLM servers to release sockets, clear attention caches, and reset VRAM slots cleanly.
 * **Degenerate Repetition Detection:** Detects infinite token loops (e.g. `00000...` or periodic repeating cycles) in the stream tail and aborts cleanly to preserve valid code.
-* **Mid-Stream Task Cancellation:** Non-destructive cancellation (`cancel_active()`) via `<kbd>s</kbd>` or `.\baton.cmd stop` without having to terminate Colibrì or Ollama.
-* **Context Ceiling Detection & Seamless Continuation:** Automatically detects when generation reaches Colibrì's token budget (`finish_reason: "length"`), using trailing unclosed assistant messages (`resolve_generation_prompt`) to continue generating across turns without loss of context.
+* **Mid-Stream Task Cancellation:** Non-destructive cancellation (`cancel_active()`) via `<kbd>s</kbd>` or `.\baton.cmd stop` without having to terminate inference servers.
+* **Context Ceiling Detection & Seamless Continuation:** Automatically detects when generation reaches the token budget (`finish_reason: "length"`), using trailing unclosed assistant messages (`resolve_generation_prompt`) or continuation recovery prompts to continue generating across turns without loss of context.
 
 ---
 

@@ -594,6 +594,66 @@ class System1Runner:
             "elapsed_seconds": elapsed,
         }
 
+    def _dispatch_tool(self, tool_name: str, params: dict[str, Any]) -> str:
+        """Dispatches execution to the appropriate tool bundle backend."""
+        tool_lower = tool_name.lower()
+        if tool_lower.startswith("rss_") or tool_lower.startswith("newsboat"):
+            return self.newsboat_tool.execute(tool_name, params)
+        elif (
+            tool_lower.startswith("python_")
+            or tool_lower.startswith("sandbox_")
+            or tool_lower.startswith("pytest_")
+            or tool_lower in ("syntax_check", "eval_code", "run_pytest")
+        ):
+            return self.sandbox_tool.execute(tool_name, params)
+        elif tool_lower.startswith("sdr_") or tool_lower.startswith("rtl_"):
+            return self.sdr_tool.execute(tool_name, params)
+        elif (
+            tool_lower.startswith("time_")
+            or tool_lower.startswith("note_")
+            or tool_lower in (
+                "get_current_time",
+                "schedule_task_alarm",
+                "create_scheduled_task",
+                "list_alarms",
+                "cancel_alarm",
+                "save_note",
+                "append_note",
+                "read_note",
+                "list_notes",
+                "dismiss_note",
+                "keepalive_note",
+            )
+        ):
+            return self.time_tool.execute(tool_name, params)
+        elif tool_lower.startswith("doc_") or tool_lower.startswith("docs_"):
+            return self.docs_tool.execute(tool_name, params)
+        elif tool_lower.startswith("vault_") or tool_lower in ("search_vault", "vault"):
+            return self.vault_tool.execute(tool_name, params)
+        else:
+            return self.zim_tool.execute(tool_name, params)
+
+    @staticmethod
+    def _is_recon_miss(text: str) -> bool:
+        """Checks if a tool result indicates a lookup miss, empty content, or error."""
+        if not text or not text.strip():
+            return True
+        t_low = text.lower()
+        return any(
+            phrase in t_low
+            for phrase in (
+                "was empty or not found",
+                "has no lead text or was not found",
+                "no infobox found",
+                "no results found",
+                "not found in [",
+                "error:",
+                "no article found",
+                "unknown tool",
+                "article not found",
+            )
+        )
+
     def execute_task(
         self,
         task: Task,
@@ -633,9 +693,7 @@ class System1Runner:
             logger.info("System 1 executing tool '%s' with params: %s", task.tool_name, task.tool_params)
             params = dict(task.tool_params or {})
             tool_lower = task.tool_name.lower()
-            if tool_lower.startswith("rss_") or tool_lower.startswith("newsboat"):
-                raw_tool_data = self.newsboat_tool.execute(task.tool_name, params)
-            elif (
+            if (
                 tool_lower.startswith("python_")
                 or tool_lower.startswith("sandbox_")
                 or tool_lower.startswith("pytest_")
@@ -657,33 +715,78 @@ class System1Runner:
                                 if "target" not in params and "pytest" in tool_lower:
                                     params["target"] = art_file.name
                                 break
-                raw_tool_data = self.sandbox_tool.execute(task.tool_name, params)
-            elif tool_lower.startswith("sdr_") or tool_lower.startswith("rtl_"):
-                raw_tool_data = self.sdr_tool.execute(task.tool_name, params)
-            elif (
-                tool_lower.startswith("time_")
-                or tool_lower.startswith("note_")
-                or tool_lower in (
-                    "get_current_time",
-                    "schedule_task_alarm",
-                    "create_scheduled_task",
-                    "list_alarms",
-                    "cancel_alarm",
-                    "save_note",
-                    "append_note",
-                    "read_note",
-                    "list_notes",
-                    "dismiss_note",
-                    "keepalive_note",
+            raw_tool_data = self._dispatch_tool(task.tool_name, params)
+
+            # Autonomous Recon Self-Recovery Loop (on lookup miss / typo)
+            if not is_verify and not is_sdr and self._is_recon_miss(raw_tool_data):
+                logger.info(
+                    "System 1 Recon tool '%s' returned a miss/empty result. Entering autonomous recovery loop...",
+                    task.tool_name,
                 )
-            ):
-                raw_tool_data = self.time_tool.execute(task.tool_name, params)
-            elif tool_lower.startswith("doc_") or tool_lower.startswith("docs_"):
-                raw_tool_data = self.docs_tool.execute(task.tool_name, params)
-            elif tool_lower.startswith("vault_") or tool_lower in ("search_vault", "vault"):
-                raw_tool_data = self.vault_tool.execute(task.tool_name, params)
-            else:
-                raw_tool_data = self.zim_tool.execute(task.tool_name, params)
+                suggestions_text = ""
+                if self.zim_tool:
+                    query_term = params.get("page_title") or params.get("title") or params.get("query") or ""
+                    if query_term:
+                        try:
+                            suggs = self.zim_tool.reader.suggest_titles(str(query_term), limit=5)
+                            if suggs:
+                                suggestions_text = f"Title suggestions from index: {', '.join(suggs)}\n"
+                            if not suggs:
+                                search_res = self.zim_tool.search(str(query_term), limit=3)
+                                if search_res and "no results found" not in search_res.lower():
+                                    suggestions_text = f"Search matches:\n{search_res[:400]}\n"
+                        except Exception as err:
+                            logger.debug("Error querying ZIM suggestions during recovery: %s", err)
+
+                recovery_sys_prompt = (
+                    "You are Baton System 1: Autonomous Recon Recovery Scout.\n"
+                    "A knowledge retrieval tool returned a miss, typo, or empty result.\n"
+                    "Analyze the mission objective and error, and output a JSON repair action to re-query knowledge:\n"
+                    "{\n"
+                    '  "diagnosis": "brief explanation of typo, bad title, or wrong tool",\n'
+                    '  "tool": "wiki_read_lead" | "wiki_read_section" | "wiki_search" | "wiki_infobox" | "rss_search" | "doc_search",\n'
+                    '  "params": {"title": "...", "page_title": "...", "section": "..."}\n'
+                    "}\n"
+                    "Output ONLY valid JSON matching this schema."
+                )
+
+                recovery_user_prompt = (
+                    f"### Recon Mission: {task.title}\n"
+                    f"Description: {task.prompt_template or ''}\n\n"
+                    f"### Failed Tool Call:\n"
+                    f"Tool: {task.tool_name}\n"
+                    f"Parameters: {json.dumps(params)}\n"
+                    f"Result: {raw_tool_data}\n\n"
+                    f"{suggestions_text}"
+                    "Diagnose the miss and provide the corrected tool call in JSON:"
+                )
+
+                try:
+                    repair_res = self.generate(recovery_user_prompt, system_prompt=recovery_sys_prompt, format="json")
+                    repair_text = repair_res.get("response", "").strip()
+                    clean_repair = re.sub(r"^```(?:json)?\s*", "", repair_text, flags=re.MULTILINE)
+                    clean_repair = re.sub(r"\s*```$", "", clean_repair, flags=re.MULTILINE).strip()
+                    repair_data = json.loads(clean_repair)
+                    new_tool = repair_data.get("tool")
+                    new_params = repair_data.get("params", {})
+                    diagnosis = repair_data.get("diagnosis", "")
+
+                    if new_tool and isinstance(new_params, dict):
+                        logger.info(
+                            "Recon Recovery diagnosis: '%s'. Retrying with '%s'(%s)...",
+                            diagnosis,
+                            new_tool,
+                            new_params,
+                        )
+                        retry_data = self._dispatch_tool(new_tool, new_params)
+                        if not self._is_recon_miss(retry_data):
+                            logger.info("System 1 Recon Recovery succeeded! Recovered %d bytes.", len(retry_data))
+                            raw_tool_data = (
+                                f"[Recon Recovery: Resolved '{task.tool_name}' miss via {new_tool}({json.dumps(new_params)}) - {diagnosis}]\n\n"
+                                + retry_data
+                            )
+                except Exception as e:
+                    logger.debug("Recon Recovery parse or dispatch failed: %s", e)
         elif is_verify and upstream_dossiers:
             # Auto-verify upstream python artifacts
             verification_findings = []

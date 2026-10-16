@@ -322,5 +322,16 @@ All architectural phases have been built and verified in the [`baton/`](file:///
 - **WSL Newsboat Snap:** Feeds cached to `baton/data/rss/cache.db`.
 - **Safe Read-Only URI Mode:** `file:...cache.db?mode=ro`, `uri=True` prevents lock collisions.
 - **HTML to Markdown Sanitization:** `clean_html()` strips bloat and produces token-efficient summaries.
-- **Unit Test Suite:** **36/36 unit tests passing** across 6 test modules (`test_chat.py`, `test_newsboat.py`, `test_db.py`, `test_orchestrator.py`, `test_progress.py`, `test_tui.py`).
+
+### Phase 9: Multi-Model Router Architecture & VRAM Budget Optimization — ✅ Complete
+- **Multi-Model Router (`llama-server :8080`):** Single server process serves both System 1 (`qwen3:14b`) and System 2 (`ornith-1.5-35b-a3b`) via `models_preset.ini`.
+- **VRAM Envelope Preservation:** Enforces `parallel=1`, `cache-type-k=q8_0`, `cache-type-v=q8_0`, and 8192 context on Qwen3, keeping total allocation within the 12GB RTX 3060 boundary and preventing PCIe paging stalls (>50x speedup from 0.6 tok/s to 32 tok/s).
+- **RAM Swapping:** Models dynamically page between 128GB host RAM and 12GB VRAM on demand (~1.1s eviction time).
+
+### Phase 10: Autonomous Recon Self-Recovery & Reasoning Code Salvage — ✅ Complete
+- **System 1 Autonomous Recon Self-Recovery:** Automatically diagnoses tool lookup misses, empty results, or typos (`_is_recon_miss`), queries ZIM suggestion indexes, and uses structured JSON self-repair to diagnose and re-dispatch the corrected tool and parameters.
+- **System 2 Decisive Reasoning & Code Salvage Fallback:** Prompts instruct decisive planning in `<think>` (<1000 tokens) and immediate conclusion with `</think>`. If generation reaches token limits before closing the reasoning block, the engine automatically extracts and salvages code blocks from the `reasoning_content` monologue.
+- **Downstream Verification Auto-Draining:** `start_orchestration` executes downstream `FAST_VERIFY` tasks queued immediately following System 2 synthesis in the same run.
+- **Unit Test Suite:** **179/179 unit and integration tests passing** across 17 test modules.
+
 

@@ -4,7 +4,7 @@
 
 ## Architecture & Modes
 
-- **System 1 (Agile Scout / Copilot):** Fast reasoning and tool-calling model (e.g. Qwen3:14B via `llama-server` router or Ollama @ ~28 tok/s) equipped with modular tool bundles:
+- **System 1 (Agile Scout / Copilot):** Fast reasoning and tool-calling model (e.g. Qwen3:14B via `llama-server` router or Ollama @ ~32 tok/s) equipped with modular tool bundles:
   - `core`: Tool Shelf discovery, on-demand bundle activation, and `tool_help`.
   - `baton`: Deterministic priority queue, DAG task creation (`add_task`), dependency wiring (`set_task_dependencies`), orchestration (`start_orchestration`), and artifact inspection.
   - `library`: Offline multi-corpus ZIM archive explorer and reader (Wikipedia, Python docs, WikiMed, etc.). Alias: `wikipedia`.
@@ -14,11 +14,14 @@
   - `time`: Real-world UTC/local time grounding, timezone offsets, task alarm scheduling, and ephemeral 24h post-it scratchpad notes with Mercy 1-Hour rules and character caps (`save_note`, `append_note`, `read_note`, `list_notes`, `dismiss_note`, `keepalive_note`).
   - `docs`: Offline API documentation and exact method signatures (Dash/Zeal .docset archives).
   - `vault`: Personal notes and project artifact full-text search (SQLite FTS5 with BM25 ranking).
+  - **Autonomous Recon Self-Recovery:** Automatically diagnoses tool lookup misses or typos via ZIM suggestion indexes and structured JSON self-repair, retrying with canonical parameters.
 - **System 2 (Deep Nocturnal Synthesis):** High-capacity MoE reasoning model (Ornith-1.5-35B-A3B Q4_K_M via `llama-server` with Multi-Token Prediction and hybrid GPU/CPU expert offloading @ ~15.5 tok/s).
-- **Multi-Model Router Mode (llama-server :8080):** Serves both System 1 (`qwen3:14b`) and System 2 (`ornith-1.5-35b-a3b`) from a single `llama-server` process on port 8080 using `models_preset.ini`. Models remain memory-mapped in 128GB system RAM and dynamically page in/out of the RTX 3060 12GB VRAM on demand (~1.1s eviction time). Eliminates OS-level process restarts, 429 thrashing, and model loading overhead.
-- **Mode A Mutual Exclusion & Fallback:** When running separate engines (Ollama on 11434 and llama-server on 8000), dynamically stops and starts the respective model engines to guarantee exclusive VRAM allocation.
-- **Cross-Process Concurrency Locking:** Enforces single-task execution across independent processes (TUI Auto-Tick, Chat Copilot `start_orchestration`, CLI) via database-level `IN_PROGRESS` mutual exclusion.
-- **Colibrì / System 2 429 Exponential Backoff:** Automatic retry on HTTP 429 with exponential delays (3s, 6s, 12s) to gracefully absorb brief GPU saturation and prompt cache evictions.
+  - **Decisive Reasoning Protocol:** Enforces focused `<think>` planning (<1000 tokens) and decisive conclusion to avoid circular reasoning loops.
+  - **Reasoning Code Salvage Fallback:** Parses and salvages drafted code blocks directly from reasoning monologues if token ceilings are reached before closing `</think>`.
+  - **Streaming Monologue Capture:** Captures the full reasoning monologue atomically to `baton/artifacts/synthesis/<task_id>_thinking.md`.
+- **Automated Verification Pipeline:** `start_orchestration` automatically executes downstream verification tasks (`fast_verify`) immediately following synthesis, ensuring code is verified without leaving verification abandoned.
+- **Multi-Model Router Mode (llama-server :8080):** Serves both System 1 (`qwen3:14b`) and System 2 (`ornith-1.5-35b-a3b`) from a single `llama-server` process on port 8080 using `models_preset.ini`. Configured with `parallel=1`, `cache-type-k=q8_0`, and `cache-type-v=q8_0` to fit strictly within the 12GB VRAM envelope of an RTX 3060. Models dynamically page in/out of VRAM on demand (~1.1s eviction time).
+- **Environment & Technical Reference:** See [`memory.md`](file:///e:/dev/Antigravity/baton/memory.md) for full hardware profiling, VRAM budget specifications, and operational guardrails.
 
 
 ## Configuration & Environment Variables

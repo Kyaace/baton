@@ -104,8 +104,12 @@ def sanitize_continuation_seam(prior: str, new_chunk: str, max_overlap: int = 80
 STATIC_SYNTHESIS_SYSTEM_PROMPT = (
     "You are Baton System 2: Deep Synthesizer & Principal Engineer.\n"
     "You write complete, production-grade, mathematically rigorous implementations and specifications.\n"
-    "Include zero placeholders, ellipses (...), or pseudo-code.\n"
-    "Every function, formula, and class must be fully written and tested."
+    "Reasoning & Execution Directives:\n"
+    "- Think decisively: plan the essential architecture, formulas, and edge cases concisely in <think>.\n"
+    "- Do not deliberate indefinitely or loop over minor stylistic conventions.\n"
+    "- Once decided, immediately emit </think> and output the complete production code wrapped in ```python ... ```.\n"
+    "- Include zero placeholders, ellipses (...), or pseudo-code.\n"
+    "- Every function, formula, and class must be fully written and tested."
 )
 
 
@@ -545,7 +549,13 @@ class System2Runner:
         prompt_parts.append(f"Instructions:\n{task.prompt_template or ''}")
 
         # 3. Action Directive
-        prompt_parts.append("\nGenerate the complete, robust implementation now:")
+        prompt_parts.append(
+            "\nReasoning & Output Protocol:\n"
+            "1. Plan your solution concisely in <think>. Keep reasoning focused on essential architecture and equations (under 500-1000 tokens).\n"
+            "2. Conclude reasoning, close the thinking block (</think>), and write the code.\n"
+            "3. Enclose all production code inside a standard markdown code block (```python ... ```) with self-contained unit tests.\n\n"
+            "Generate the complete, robust implementation now:"
+        )
 
         full_user_prompt = "\n".join(prompt_parts)
 
@@ -614,10 +624,23 @@ class System2Runner:
                 max_conts,
             )
 
-            # Colibrì native continuation contract: trailing assistant message without closing
-            continue_messages = list(messages) + [
-                {"role": "assistant", "content": output_code}
-            ]
+            # Colibrì native continuation contract:
+            # If output_code is empty, the model hit token limit while still inside reasoning (<think>)
+            if not output_code:
+                continue_messages = list(messages) + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "You reached the token ceiling during reasoning. "
+                            "Conclude your thinking immediately with </think> and output the complete production code "
+                            "now inside a ```python ``` code block."
+                        ),
+                    }
+                ]
+            else:
+                continue_messages = list(messages) + [
+                    {"role": "assistant", "content": output_code}
+                ]
 
             res = self.chat_completion(
                 continue_messages,
@@ -650,6 +673,34 @@ class System2Runner:
 
         elapsed = time.time() - t0
 
+        # Salvage code from reasoning monologue if output_code is empty but code was drafted inside <think>
+        if not output_code.strip() and reasoning:
+            code_match = re.search(r"```(?:python)?\s*\n(.*?)\n```", reasoning, re.DOTALL | re.IGNORECASE)
+            if not code_match:
+                code_match = re.search(r"```(?:python)?\s*\n(.*)", reasoning, re.DOTALL | re.IGNORECASE)
+            if code_match:
+                salvaged = code_match.group(1).rstrip("`").strip()
+                if salvaged:
+                    logger.warning(
+                        "System 2 model generated code inside reasoning (<think>) block without closing </think>. "
+                        "Successfully salvaged %d characters of production code from reasoning monologue.",
+                        len(salvaged),
+                    )
+                    output_code = salvaged
+            else:
+                tail_code_match = re.search(
+                    r"\n((?:from\s+\S+\s+import|import\s+\S+|def\s+\w+|class\s+\w+)[\s\S]{50,})$",
+                    reasoning,
+                )
+                if tail_code_match:
+                    candidate = tail_code_match.group(1).strip()
+                    logger.warning(
+                        "System 2 model drafted raw Python code in reasoning tail without code fences. "
+                        "Salvaged %d characters of code.",
+                        len(candidate),
+                    )
+                    output_code = candidate
+
         if progress:
             progress.is_completed = True
             progress.finish_reason = finish_reason
@@ -666,6 +717,18 @@ class System2Runner:
             match = re.search(r"([a-zA-Z0-9_\-]+\.py)", task.prompt_template)
             if match:
                 filename = match.group(1)
+        elif (
+            task.task_type == TaskType.DEEP_SYNTHESIS
+            or any(
+                kw in (task.title + " " + (task.prompt_template or "")).lower()
+                for kw in ("python", "function", "class", "module", "script", "def ")
+            )
+            or output_code.startswith("def ")
+            or output_code.startswith("import ")
+            or output_code.startswith("from ")
+            or "```python" in reasoning
+        ):
+            filename = f"{task.task_id}.py"
 
         artifact_path = self.artifacts_dir / filename
         artifact_path.write_text(output_code.strip(), encoding="utf-8")

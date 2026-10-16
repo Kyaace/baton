@@ -847,6 +847,56 @@ def test_orchestration_restores_system1_engine(chat_session: BatonChatSession):
     assert chat_session.orchestrator.engine_mgr.active_tier == Tier.SYSTEM_1
 
 
+def test_start_orchestration_auto_drains_downstream_verification_for_system_2(chat_session: BatonChatSession):
+    """Verify that start_orchestration steps immediately injected FAST_VERIFY tasks even if max_steps=1."""
+    from baton.models import TaskType
+    # 1. Add System 2 synthesis task
+    t_synth = chat_session.db.create_task(
+        task_id="synth_test",
+        title="Synthesize Core",
+        tier=Tier.SYSTEM_2,
+        task_type=TaskType.DEEP_SYNTHESIS,
+    )
+    # Mock System 2 synthesis producing a python file
+    chat_session.orchestrator.system2.synthesize = MagicMock(
+        return_value=("Synthesized code", "core.py", 200, 1.5)
+    )
+    # Mock System 1 verification
+    chat_session.orchestrator.system1.execute_task = MagicMock(
+        return_value=("Verification report", "verify_core.md", 50, 0.5)
+    )
+
+    # 2. Run start_orchestration with max_steps=1
+    res = chat_session.execute_tool("start_orchestration", {"max_steps": 1})
+    assert res["success"] is True
+    # Both the synthesis task AND the automatically enqueued verification task should have run!
+    assert res["steps_executed"] == 2
+    task_ids = [t["task_id"] for t in res["executed_tasks"]]
+    assert "synth_test" in task_ids
+    assert "verify_synth_test" in task_ids
+
+
+def test_read_artifact_empty_file_warning(chat_session: BatonChatSession, tmp_path):
+    """Verify that read_artifact warns when artifact file is 0 bytes."""
+    empty_file = tmp_path / "empty_output.txt"
+    empty_file.write_text("", encoding="utf-8")
+
+    task = chat_session.db.create_task(
+        task_id="task_empty",
+        title="Empty Task",
+        tier=Tier.SYSTEM_2,
+    )
+    chat_session.db.mark_task_completed(
+        task_id="task_empty",
+        result_payload="Synthesized 1000 tokens",
+        artifact_path=str(empty_file),
+    )
+
+    res = chat_session.execute_tool("read_artifact", {"task_id": "task_empty"})
+    assert "0 bytes (empty output)" in res["content"]
+
+
+
 
 
 

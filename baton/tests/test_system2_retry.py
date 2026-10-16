@@ -85,3 +85,43 @@ def test_post_with_retry_cancelled_raises_task_cancelled():
             stream=False,
             timeout=10.0,
         )
+
+
+def test_system2_salvages_code_from_reasoning_monologue(tmp_path):
+    from pathlib import Path
+    from baton.models import Task, TaskType, Tier
+
+    runner = System2Runner(artifacts_dir=tmp_path)
+    task = Task(
+        task_id="synth_salvage",
+        job_id="job_salvage",
+        title="Synthesize Salvage Function",
+        tier=Tier.SYSTEM_2,
+        task_type=TaskType.DEEP_SYNTHESIS,
+        prompt_template="Create a Python function",
+    )
+
+    # Mock chat_completion returning empty content, but code inside reasoning
+    reasoning_code = (
+        "Let me think about this problem.\n"
+        "Here is the function:\n"
+        "```python\n"
+        "def test_salvaged():\n"
+        "    return 42\n"
+        "```\n"
+    )
+    mock_res = {
+        "content": "",
+        "reasoning_content": reasoning_code,
+        "tokens_generated": 500,
+        "elapsed_seconds": 1.0,
+        "finish_reason": "stop",
+    }
+    with patch.object(runner, "chat_completion", return_value=mock_res):
+        summary, art_path, tokens, elapsed = runner.synthesize(task)
+        assert art_path is not None
+        assert art_path.endswith(".py")
+        content = Path(art_path).read_text(encoding="utf-8")
+        assert "def test_salvaged():" in content
+        assert "return 42" in content
+
