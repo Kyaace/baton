@@ -60,4 +60,17 @@ exit /b 1
 
 :found_python
 set "PYTHONPATH=%~dp0;%PYTHONPATH%"
+
+:: When running chat, ensure llama-server router is running on port 8080 instead of ollama
+if /i not "%~1"=="chat" goto :run_cli
+
+netstat -ano 2>nul | findstr :8080 | findstr LISTENING >nul 2>&1
+if not errorlevel 1 goto :run_cli
+
+echo [INFO] llama-server router is not running on port 8080.
+echo [INFO] Booting up llama-server Multi-Model Router (Ornith + Qwen3)...
+start "llama-server Router" /min cmd /c "%~dp0scripts\run_router.bat serve > %~dp0router_server.log 2>&1"
+timeout /t 2 /nobreak >nul 2>&1
+
+:run_cli
 "%PY_EXE%" -m baton.cli %*

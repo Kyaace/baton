@@ -121,7 +121,14 @@ class EngineManager:
         env_val = os.getenv("BATON_USE_ROUTER")
         if env_val is not None:
             return env_val.lower() in ("1", "true", "yes", "on")
-        return self.is_router_online()
+        if self.is_router_online():
+            return True
+        # Default to router mode if preset file or router script is present in repository
+        preset_file = self.repo_root / "models_preset.ini"
+        router_script = self.repo_root / "scripts" / "run_router.bat"
+        if preset_file.exists() or router_script.exists():
+            return True
+        return False
 
     def get_status(self) -> dict[str, Any]:
         """Returns live status of all engines."""

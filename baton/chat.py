@@ -3277,15 +3277,25 @@ class BatonChatSession:
 
     def run_repl(self) -> None:
         """Runs the interactive zero-latency readline chat loop."""
-        # Ensure Ollama is online if possible
-        if not self.engine_mgr.is_ollama_online():
-            console.print("[yellow]Ollama is currently offline. Starting Ollama daemon...[/]")
-            started = self.engine_mgr.start_ollama()
-            if not started:
-                console.print(
-                    "[bold red]Warning: Could not connect to Ollama. "
-                    "Make sure Ollama is running at http://127.0.0.1:11434[/]"
-                )
+        # Ensure LLM engine is online (llama-server router preferred, Ollama fallback)
+        if self.is_openai_mode or self.engine_mgr.is_router_mode():
+            if not self.engine_mgr.is_router_online():
+                console.print("[cyan]llama-server Multi-Model Router is offline. Starting router on port 8080...[/]")
+                started = self.engine_mgr.start_router()
+                if not started:
+                    console.print(
+                        f"[bold red]Warning: Could not connect to llama-server router at {self.ollama_url}. "
+                        "Check router_server.log or run '.\\scripts\\run_router.bat' manually.[/]"
+                    )
+        else:
+            if not self.engine_mgr.is_ollama_online():
+                console.print("[yellow]Ollama is currently offline. Starting Ollama daemon...[/]")
+                started = self.engine_mgr.start_ollama()
+                if not started:
+                    console.print(
+                        f"[bold red]Warning: Could not connect to Ollama at {self.ollama_url}. "
+                        "Make sure Ollama is running at http://127.0.0.1:11434[/]"
+                    )
 
         self.print_welcome()
         session: PromptSession = PromptSession(history=InMemoryHistory())
