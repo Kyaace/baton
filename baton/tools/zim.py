@@ -314,25 +314,45 @@ class ZimTool:
         """Deterministic dispatcher for named tool calls."""
         name = tool_name.lower().strip()
         corpus = params.get("corpus")
+        title = (
+            params.get("title")
+            or params.get("page_title")
+            or params.get("article")
+            or params.get("query")
+            or ""
+        )
+        section = (
+            params.get("section")
+            or params.get("heading")
+            or params.get("section_title")
+            or ""
+        )
         if name in ("zim_list_corpora", "list_corpora", "corpora", "zim_corpora"):
             return self.format_corpora_markdown()
         elif name in ("wiki_search", "zim_search", "search"):
             return self.search(
-                query=params.get("query", ""),
+                query=params.get("query") or params.get("search") or title,
                 limit=params.get("limit", 5),
                 corpus=corpus,
             )
         elif name in ("wiki_read_lead", "zim_read_lead", "read_lead"):
-            return self.read_lead(title=params.get("title", ""), corpus=corpus)
+            return self.read_lead(title=title, corpus=corpus)
         elif name in ("wiki_read_section", "zim_read_section", "read_section"):
-            return self.read_section(
-                title=params.get("title", ""),
-                section=params.get("section", ""),
+            if not section:
+                return self.read_lead(title=title, corpus=corpus)
+            res = self.read_section(
+                title=title,
+                section=section,
                 corpus=corpus,
             )
+            if "was empty or not found" in res:
+                lead = self.read_lead(title=title, corpus=corpus)
+                if lead and "not found" not in lead:
+                    return f"{res}\n\nFalling back to lead section:\n\n{lead}"
+            return res
         elif name in ("wiki_infobox", "zim_infobox", "infobox"):
-            return self.get_infobox(title=params.get("title", ""), corpus=corpus)
+            return self.get_infobox(title=title, corpus=corpus)
         elif name in ("wiki_toc", "zim_toc", "toc"):
-            return self.get_toc(title=params.get("title", ""), corpus=corpus)
+            return self.get_toc(title=title, corpus=corpus)
         else:
             return f"Error: Unknown Zim tool '{tool_name}'."

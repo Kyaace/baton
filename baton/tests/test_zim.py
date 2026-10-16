@@ -106,3 +106,23 @@ def test_multi_zim_corpus_routing():
     assert "matches across corpora" in all_res
     assert "[wikipedia]" in all_res
     assert "[stackoverflow]" in all_res
+
+
+def test_zim_tool_dispatcher_aliases_and_fallback():
+    mock_reader = MagicMock()
+    mock_reader.read_lead.return_value = "Daylight saving time is the practice..."
+    mock_reader.read_section.return_value = ""  # section not found
+
+    tool = ZimTool(zim_path="dummy.zim")
+    tool._reader = mock_reader
+
+    # page_title alias without section -> falls back to read_lead
+    res = tool.execute("wiki_read_section", {"page_title": "Daylight saving time"})
+    assert "# Daylight saving time (Lead Section)" in res
+    assert "Daylight saving time is the practice..." in res
+
+    # page_title alias with missing section -> falls back to read_lead with context note
+    res = tool.execute("wiki_read_section", {"page_title": "Daylight saving time", "section": "NonExistent"})
+    assert "was empty or not found" in res
+    assert "Falling back to lead section" in res
+    assert "Daylight saving time is the practice..." in res
