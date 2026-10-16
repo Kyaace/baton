@@ -48,6 +48,8 @@
   ctx-size = 32768
   cache-type-k = q8_0
   cache-type-v = q8_0
+  reasoning-budget = 1200
+  reasoning-budget-message = "Plan complete. Finishing thinking and write your output now."
 
   [qwen3:14b]
   model = C:\colibri_models\qwen3-14b\qwen3-14b-q4_k_m.gguf
