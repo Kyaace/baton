@@ -7,6 +7,7 @@ and dispatching work orders to System 1 and System 2.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -51,8 +52,21 @@ class Orchestrator:
     ):
         self.db = db or Database()
         self.engine_mgr = engine_manager or EngineManager()
-        self.system1 = system1 or System1Runner(ollama_url=getattr(self.engine_mgr, "ollama_url", None))
-        self.system2 = system2 or System2Runner(colibri_url=getattr(self.engine_mgr, "colibri_url", None))
+
+        if getattr(self.engine_mgr, "is_router_mode", lambda: False)() or getattr(self.engine_mgr, "is_router_online", lambda: False)():
+            router_url = getattr(self.engine_mgr, "router_url", "http://127.0.0.1:8080")
+            s1_url = router_url
+            s2_url = router_url
+            s1_model = os.getenv("BATON_SYSTEM1_MODEL") or "qwen3"
+            s2_model = os.getenv("BATON_SYSTEM2_MODEL") or "ornith"
+        else:
+            s1_url = getattr(self.engine_mgr, "ollama_url", None)
+            s2_url = getattr(self.engine_mgr, "colibri_url", None)
+            s1_model = os.getenv("BATON_SYSTEM1_MODEL")
+            s2_model = os.getenv("BATON_SYSTEM2_MODEL")
+
+        self.system1 = system1 or System1Runner(ollama_url=s1_url, model_name=s1_model)
+        self.system2 = system2 or System2Runner(colibri_url=s2_url, model_name=s2_model)
         self.progress_dir = progress_dir or Path("baton/artifacts/progress")
         self.progress_dir.mkdir(parents=True, exist_ok=True)
         self.auto_verify = auto_verify

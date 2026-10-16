@@ -159,13 +159,22 @@ class System2Runner:
             if res.status_code == 200:
                 data = res.json()
                 models = data.get("data", [])
+                # In router mode where multiple models are registered, select Ornith
+                for m in models:
+                    m_id = m.get("id", "")
+                    aliases = [a.lower() for a in m.get("aliases", [])]
+                    if "ornith" in m_id.lower() or any("ornith" in a for a in aliases):
+                        self._discovered_model = "ornith"
+                        logger.info("Discovered System 2 Ornith model: %s", self._discovered_model)
+                        return self._discovered_model
+
                 if models and "id" in models[0]:
                     self._discovered_model = models[0]["id"]
                     logger.info("Discovered System 2 model ID: %s", self._discovered_model)
                     return self._discovered_model
         except Exception as e:
             logger.debug("Failed to query System 2 models: %s", e)
-        return "ornith-1.5-35b-a3b"
+        return "ornith"
 
     def _post_with_retry(
         self,

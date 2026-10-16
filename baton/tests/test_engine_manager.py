@@ -144,12 +144,12 @@ def test_engine_manager_mode_a_mutual_exclusion(
     mock_stop_coli, mock_start_coli, mock_stop_ollama, mock_start_ollama
 ):
     """Verify Mode A switches between System 1 and System 2 mutually exclusively."""
-    em = EngineManager()
+    em = EngineManager(use_router=False)
 
     # Initial state: switch to System 1 while Colibrì is online
     with patch.object(em, "is_colibri_online", return_value=True), patch.object(
         em, "is_ollama_online", return_value=False
-    ):
+    ), patch.object(em, "is_router_online", return_value=False):
         ok = em.switch_to_tier(Tier.SYSTEM_1)
         assert ok is True
         assert em.active_tier == Tier.SYSTEM_1
@@ -162,7 +162,7 @@ def test_engine_manager_mode_a_mutual_exclusion(
     # Switch to System 2 while Ollama is online
     with patch.object(em, "is_colibri_online", return_value=False), patch.object(
         em, "is_ollama_online", return_value=True
-    ):
+    ), patch.object(em, "is_router_online", return_value=False):
         ok = em.switch_to_tier(Tier.SYSTEM_2)
         assert ok is True
         assert em.active_tier == Tier.SYSTEM_2
@@ -170,8 +170,33 @@ def test_engine_manager_mode_a_mutual_exclusion(
         mock_start_coli.assert_called_once()
 
     # Stop all
-    em.stop_all()
+    with patch.object(em, "is_router_online", return_value=False):
+        em.stop_all()
     assert em.active_tier is None
+
+
+@patch.object(EngineManager, "start_router", return_value=True)
+def test_engine_manager_router_mode_tier_switching(mock_start_router):
+    """Verify router mode provides zero-downtime tier switching without process restart."""
+    em = EngineManager(use_router=True)
+
+    with patch.object(em, "is_router_online", return_value=True):
+        # Switching between tiers should not stop any server
+        ok1 = em.switch_to_tier(Tier.SYSTEM_1)
+        assert ok1 is True
+        assert em.active_tier == Tier.SYSTEM_1
+        mock_start_router.assert_not_called()
+
+        ok2 = em.switch_to_tier(Tier.SYSTEM_2)
+        assert ok2 is True
+        assert em.active_tier == Tier.SYSTEM_2
+        mock_start_router.assert_not_called()
+
+    # If router is offline, switch_to_tier starts it
+    with patch.object(em, "is_router_online", side_effect=[False, True]):
+        ok3 = em.switch_to_tier(Tier.SYSTEM_1)
+        assert ok3 is True
+        mock_start_router.assert_called_once()
 
 
 @patch("subprocess.run")

@@ -32,6 +32,10 @@ class EngineManager:
         ollama_stop_cmd: Optional[str] = None,
         colibri_start_cmd: Optional[str] = None,
         colibri_stop_cmd: Optional[str] = None,
+        router_url: Optional[str] = None,
+        router_start_cmd: Optional[str] = None,
+        router_stop_cmd: Optional[str] = None,
+        use_router: Optional[bool] = None,
     ):
         self.repo_root = repo_root or Path(__file__).resolve().parent.parent
         self.ollama_url = (
@@ -44,6 +48,11 @@ class EngineManager:
             or os.getenv("BATON_COLIBRI_URL")
             or os.getenv("BATON_SYSTEM2_URL")
             or "http://127.0.0.1:8000"
+        ).rstrip("/")
+        self.router_url = (
+            router_url
+            or os.getenv("BATON_ROUTER_URL")
+            or "http://127.0.0.1:8080"
         ).rstrip("/")
 
         # Command hooks (env vars > explicit args > automatic resolution)
@@ -59,6 +68,15 @@ class EngineManager:
             or os.getenv("BATON_COLIBRI_STOP_CMD")
             or os.getenv("BATON_SYSTEM2_STOP_CMD")
         )
+        self.router_start_cmd = (
+            router_start_cmd
+            or os.getenv("BATON_ROUTER_START_CMD")
+        )
+        self.router_stop_cmd = (
+            router_stop_cmd
+            or os.getenv("BATON_ROUTER_STOP_CMD")
+        )
+        self._use_router = use_router
 
         self.active_tier: Optional[Tier] = None
 
@@ -88,21 +106,47 @@ class EngineManager:
         except Exception:
             return False
 
+    def is_router_online(self) -> bool:
+        """Probe llama-server multi-model router on port 8080."""
+        try:
+            res = requests.get(f"{self.router_url}/v1/models", timeout=1.5)
+            return res.status_code == 200
+        except Exception:
+            return False
+
+    def is_router_mode(self) -> bool:
+        """Determines if the multi-model router architecture should be utilized."""
+        if self._use_router is not None:
+            return self._use_router
+        env_val = os.getenv("BATON_USE_ROUTER")
+        if env_val is not None:
+            return env_val.lower() in ("1", "true", "yes", "on")
+        return self.is_router_online()
+
     def get_status(self) -> dict[str, Any]:
-        """Returns live status of both engines."""
+        """Returns live status of all engines."""
+        router_up = self.is_router_online()
         ollama_up = self.is_ollama_online()
         colibri_up = self.is_colibri_online()
+        router_active = self.is_router_mode() or router_up
+
         return {
             "active_tier": self.active_tier.value if self.active_tier else "idle",
+            "router_mode": router_active,
+            "router": {
+                "online": router_up,
+                "url": self.router_url,
+                "status": EngineStatus.READY.value if router_up else EngineStatus.STOPPED.value,
+            },
             "ollama": {
-                "online": ollama_up,
-                "url": self.ollama_url,
-                "status": EngineStatus.READY.value if ollama_up else EngineStatus.STOPPED.value,
+                "online": ollama_up or router_up,
+                "url": self.router_url if router_active else self.ollama_url,
+                "status": EngineStatus.READY.value if (ollama_up or router_up) else EngineStatus.STOPPED.value,
             },
             "colibri": {
-                "online": colibri_up,
-                "url": self.colibri_url,
-                "status": EngineStatus.READY.value if colibri_up else EngineStatus.STOPPED.value,
+                "online": colibri_up or router_up,
+                "url": self.router_url if router_active else self.colibri_url,
+                "status": EngineStatus.READY.value if (colibri_up or router_up) else EngineStatus.STOPPED.value,
             },
         }
 
@@ -318,11 +362,104 @@ class EngineManager:
         return not self.is_colibri_online()
 
     # -------------------------------------------------------------------------
-    # Mode A Mutual Exclusion Switching
+    # llama-server Multi-Model Router Management
+    # -------------------------------------------------------------------------
+
+    def start_router(self, timeout_sec: int = 60) -> bool:
+        """Starts llama-server multi-model router on port 8080."""
+        if self.is_router_online():
+            logger.info("llama-server multi-model router is already online.")
+            return True
+
+        if self.router_start_cmd:
+            subprocess.run(self.router_start_cmd, cwd=str(self.repo_root), shell=True, check=False)
+        else:
+            script_candidates = [
+                self.repo_root / "scripts" / "run_router.bat",
+                self.repo_root / "scripts" / "run_router.sh",
+                Path("E:/dev/Antigravity/local_llm/scripts/run_router.bat"),
+                Path("E:/dev/Antigravity/local_llm/scripts/run_router.sh"),
+            ]
+            found_script = next((s for s in script_candidates if s.exists()), None)
+            if found_script:
+                if os.name == "nt" and found_script.suffix == ".bat":
+                    cmd = f'start "llama-server Router" /min cmd /c "{found_script} serve > router_server.log 2>&1"'
+                    subprocess.run(cmd, cwd=str(self.repo_root), shell=True, check=False)
+                else:
+                    subprocess.Popen([str(found_script), "serve"], cwd=str(self.repo_root), shell=True)
+            else:
+                logger.info(
+                    "No router start script found. Waiting for external endpoint at %s...",
+                    self.router_url,
+                )
+
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            if self.is_router_online():
+                logger.info("llama-server router initialized successfully.")
+                return True
+            time.sleep(1.5)
+
+        logger.warning(
+            "llama-server router start timed out (endpoint: %s).",
+            self.router_url,
+        )
+        return False
+
+    def stop_router(self) -> bool:
+        """Stops llama-server multi-model router and frees GPU VRAM and RAM."""
+        if self.router_stop_cmd:
+            subprocess.run(self.router_stop_cmd, cwd=str(self.repo_root), shell=True, check=False)
+        else:
+            script_candidates = [
+                self.repo_root / "scripts" / "stop_router.bat",
+                self.repo_root / "scripts" / "stop_router.sh",
+                self.repo_root / "scripts" / "stop_ornith.bat",
+                self.repo_root / "scripts" / "stop_ornith.sh",
+            ]
+            found_script = next((s for s in script_candidates if s.exists()), None)
+            if found_script:
+                subprocess.run([str(found_script)], cwd=str(self.repo_root), shell=True, check=False)
+
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/IM", "llama-server.exe"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-f", "llama-server"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+        time.sleep(1.5)
+        return not self.is_router_online()
+
+    # -------------------------------------------------------------------------
+    # Mode A Mutual Exclusion & Router Tier Switching
     # -------------------------------------------------------------------------
 
     def switch_to_tier(self, target_tier: Tier) -> bool:
         """Guarantees the target tier's engine is online while stopping the other."""
+        # 1. Router Mode: llama-server handles mutual exclusion and VRAM paging natively
+        if self.is_router_mode() or self.is_router_online():
+            if not self.is_router_online():
+                logger.info("Router Mode: Starting unified llama-server router on port 8080...")
+                ok = self.start_router()
+                if not ok:
+                    return False
+            self.active_tier = target_tier
+            logger.info(
+                "Router Mode: Active tier set to %s (llama-server handles VRAM paging on-demand)",
+                target_tier.value,
+            )
+            return True
+
+        # 2. Classic Interleaved Mode A: Separate process switching
         if target_tier == Tier.SYSTEM_1:
             if self.is_colibri_online():
                 logger.info("Mode A: Stopping System 2 (Colibrì) to release GPU VRAM & RAM...")
@@ -353,6 +490,8 @@ class EngineManager:
 
     def stop_all(self) -> None:
         """Clean shutdown of all engines."""
+        if self.is_router_online():
+            self.stop_router()
         self.stop_ollama()
         self.stop_colibri()
         self.active_tier = None

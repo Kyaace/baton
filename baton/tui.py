@@ -81,10 +81,16 @@ class BatonTUI:
             "[green]ONLINE[/]" if status["colibri"]["online"] else "[dim]STOPPED[/]"
         )
 
+        router_status = status.get("router", {})
+        if router_status.get("online"):
+            engine_stat_line = "Router (:8080): [green]ONLINE (Ornith-35B + Qwen3-14B)[/]   |   Mode: [cyan]Router Mode (Dynamic Paging)[/]"
+        else:
+            engine_stat_line = f"Ollama (:11434): {ollama_stat}   |   Colibrì (:8000): {colibri_stat}   |   Mode: [cyan]Mode A (Interleaved)[/]"
+
         header_text = Text.from_markup(
             f"[bold cyan]BATON[/] [dim]|[/] Dual-Speed System 1 / System 2 Orchestrator\n"
             f"Hardware: Intel i5-13500 | 128 GB RAM | RTX 3060 12GB\n"
-            f"Ollama (:11434): {ollama_stat}   |   Colibrì (:8000): {colibri_stat}   |   Mode: [cyan]Mode A (Interleaved)[/]"
+            f"{engine_stat_line}"
         )
 
         table = Table.grid(expand=True)

@@ -497,21 +497,29 @@ class BatonApp(App):
             if rt.tier == Tier.SYSTEM_1:
                 tier_badge = f"[bold white on dark_green] RUNNING: S1 (Qwen3:14B){prog_info} [/]"
             else:
-                tier_badge = f"[bold white on dark_magenta] RUNNING: S2 (DeepSeek-V4-Flash){prog_info} [/]"
+                tier_badge = f"[bold white on dark_magenta] RUNNING: S2 (Ornith-35B){prog_info} [/]"
         elif active == "SYSTEM_1":
             tier_badge = "[bold white on dark_green] ACTIVE: SYSTEM 1 (Qwen3:14B) [/]"
         elif active == "SYSTEM_2":
-            tier_badge = "[bold white on dark_magenta] ACTIVE: SYSTEM 2 (DeepSeek-V4-Flash) [/]"
+            tier_badge = "[bold white on dark_magenta] ACTIVE: SYSTEM 2 (Ornith-35B) [/]"
         else:
-            tier_badge = "[bold black on dark_orange] IDLE (Mode A Standby) [/]"
+            tier_badge = "[bold black on dark_orange] IDLE (Standby) [/]"
 
-        ollama_stat = "[bold green]ONLINE[/]" if status["ollama"]["online"] else "[dim]STOPPED[/]"
-        colibri_stat = "[bold green]ONLINE[/]" if status["colibri"]["online"] else "[dim]STOPPED[/]"
+        router_status = status.get("router", {})
+        if router_status.get("online"):
+            engine_summary = "Router (:8080): [bold green]ONLINE (Ornith-35B + Qwen3-14B)[/]"
+            mode_label = "Router Mode"
+        else:
+            ollama_stat = "[bold green]ONLINE[/]" if status["ollama"]["online"] else "[dim]STOPPED[/]"
+            colibri_stat = "[bold green]ONLINE[/]" if status["colibri"]["online"] else "[dim]STOPPED[/]"
+            engine_summary = f"Ollama (:11434): {ollama_stat}  |  Colibrì (:8000): {colibri_stat}"
+            mode_label = "Mode A (Interleaved)"
+
         auto_badge = "[bold white on blue] AUTO-TICK: ON [/]" if self.auto_tick_enabled else "[dim]AUTO-TICK: OFF[/]"
 
         markup = (
-            f" [bold cyan]BATON[/] | Mode A (Interleaved)  |  "
-            f"Ollama (:11434): {ollama_stat}  |  Colibrì (:8000): {colibri_stat}   "
+            f" [bold cyan]BATON[/] | {mode_label}  |  "
+            f"{engine_summary}   "
             f"{tier_badge}  {auto_badge}"
         )
         self.query_one("#engine-bar", Static).update(markup)

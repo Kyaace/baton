@@ -349,6 +349,12 @@ class System1Runner:
             self._vault_tool = VaultTool()
         return self._vault_tool
 
+    @property
+    def is_openai_backend(self) -> bool:
+        """Determines if the endpoint is an OpenAI-compatible / llama-server router endpoint."""
+        url = self.ollama_url.lower()
+        return ":8080" in url or ":8000" in url or url.endswith("/v1") or os.getenv("BATON_USE_ROUTER") in ("1", "true", "yes")
+
     def generate(
         self,
         prompt: str,
@@ -359,7 +365,141 @@ class System1Runner:
         progress_callback: Optional[Callable[[TaskProgress], None]] = None,
         format: Optional[str | dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Calls Ollama generate API with optional streaming."""
+        """Calls System 1 generation API (Ollama or OpenAI-compatible llama-server router)."""
+        t0 = time.time()
+        self._cancel_requested = False
+
+        # ---------------------------------------------------------------------
+        # OpenAI / llama-server router mode
+        # ---------------------------------------------------------------------
+        if self.is_openai_backend:
+            endpoint = (
+                f"{self.ollama_url}/chat/completions"
+                if self.ollama_url.endswith("/v1")
+                else f"{self.ollama_url}/v1/chat/completions"
+            )
+            messages: list[dict[str, str]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+            # Normalise model name for router: accept qwen3, qwen3:14b, etc.
+            model_target = self.model_name
+            if model_target.lower() in ("qwen3:14b", "qwen3-14b"):
+                model_target = "qwen3"
+
+            payload: dict[str, Any] = {
+                "model": model_target,
+                "messages": messages,
+                "temperature": 0.2,
+                "stream": stream,
+            }
+            if format == "json" or format == {"type": "json_object"}:
+                payload["response_format"] = {"type": "json_object"}
+            if stream:
+                payload["stream_options"] = {"include_usage": True}
+
+            if not stream:
+                if self._cancel_requested:
+                    raise TaskCancelledError("System 1 generation stopped by user.")
+                res = requests.post(endpoint, json=payload, timeout=timeout)
+                res.raise_for_status()
+                data = res.json()
+                choice = data.get("choices", [{}])[0]
+                msg = choice.get("message", {})
+                content = msg.get("content", "").strip()
+                if not content and msg.get("reasoning_content"):
+                    content = msg["reasoning_content"].strip()
+                tokens = data.get("usage", {}).get("completion_tokens", 0)
+                elapsed = time.time() - t0
+                return {
+                    "response": content,
+                    "tokens_generated": tokens,
+                    "elapsed_seconds": elapsed,
+                }
+
+            # Streaming mode (SSE)
+            try:
+                res = requests.post(endpoint, json=payload, stream=True, timeout=timeout)
+                res.raise_for_status()
+                self._active_response = res
+
+                content_parts: list[str] = []
+                tokens_count = 0
+                last_callback_time = 0.0
+
+                try:
+                    for raw_line in res.iter_lines(decode_unicode=True):
+                        if self._cancel_requested:
+                            raise TaskCancelledError("System 1 generation stopped by user.")
+                        if not raw_line:
+                            continue
+                        if isinstance(raw_line, bytes):
+                            line_str = raw_line.decode("utf-8", errors="replace").strip()
+                        else:
+                            line_str = str(raw_line).strip()
+                        if not line_str.startswith("data:"):
+                            continue
+                        data_str = line_str[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                        except Exception:
+                            continue
+
+                        usage = data.get("usage")
+                        if usage and "completion_tokens" in usage:
+                            tokens_count = usage["completion_tokens"]
+
+                        choices = data.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        chunk = delta.get("content", "")
+                        if chunk:
+                            content_parts.append(chunk)
+                            if not usage:
+                                tokens_count += 1
+
+                        now = time.time()
+                        if progress and chunk:
+                            progress.content_text = "".join(content_parts)
+                            progress.tokens_generated = tokens_count
+                            progress.tokens_per_second = tokens_count / max(now - progress.started_at, 0.001)
+                            progress.last_update = now
+
+                            if progress_callback and (now - last_callback_time >= 0.05):
+                                last_callback_time = now
+                                progress_callback(progress)
+                except (requests.exceptions.RequestException, OSError):
+                    if self._cancel_requested:
+                        raise TaskCancelledError("System 1 generation stopped by user.")
+                    raise
+            finally:
+                self._active_response = None
+
+            elapsed = time.time() - t0
+            final_text = "".join(content_parts).strip()
+
+            if progress:
+                progress.content_text = final_text
+                progress.tokens_generated = tokens_count
+                progress.tokens_per_second = tokens_count / max(elapsed, 0.001)
+                progress.last_update = time.time()
+                progress.is_completed = True
+                if progress_callback:
+                    progress_callback(progress)
+
+            return {
+                "response": final_text,
+                "tokens_generated": tokens_count,
+                "elapsed_seconds": elapsed,
+            }
+
+        # ---------------------------------------------------------------------
+        # Classic Ollama /api/generate mode
+        # ---------------------------------------------------------------------
         payload: dict[str, Any] = {
             "model": self.model_name,
             "prompt": prompt,
@@ -373,9 +513,6 @@ class System1Runner:
             payload["format"] = format
         if system_prompt:
             payload["system"] = system_prompt
-
-        t0 = time.time()
-        self._cancel_requested = False
 
         if not stream:
             if self._cancel_requested:

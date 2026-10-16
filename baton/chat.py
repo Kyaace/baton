@@ -1661,16 +1661,25 @@ class BatonChatSession:
         self._time_tool = time_tool
         self._docs_tool = docs_tool
         self._vault_tool = vault_tool
+        if (
+            getattr(self.engine_mgr, "is_router_mode", lambda: False)()
+            or getattr(self.engine_mgr, "is_router_online", lambda: False)()
+        ):
+            default_url = getattr(self.engine_mgr, "router_url", "http://127.0.0.1:8080")
+            default_model = "qwen3"
+        else:
+            default_url = getattr(self.engine_mgr, "ollama_url", "http://127.0.0.1:11434")
+            default_model = "qwen3:14b"
+
         self.ollama_url = (
             ollama_url
-            or getattr(self.engine_mgr, "ollama_url", None)
             or os.getenv("BATON_OLLAMA_URL")
-            or "http://127.0.0.1:11434"
+            or default_url
         ).rstrip("/")
         self.model_name = (
             model_name
             or os.getenv("BATON_SYSTEM1_MODEL")
-            or "qwen3:14b"
+            or default_model
         )
         # Baton Chat has access to 'core' and 'baton' bundles by default.
         # Research agents can pass initial_bundles={'core', 'library'} to exclude queue tools.
@@ -1703,6 +1712,12 @@ class BatonChatSession:
             self.latest_log_path.write_text(header, encoding="utf-8")
         except Exception as e:
             logger.debug("Failed initializing chat log header: %s", e)
+
+    @property
+    def is_openai_mode(self) -> bool:
+        """Determines if Chat Copilot targets the llama-server router / OpenAI endpoint."""
+        url = self.ollama_url.lower()
+        return ":8080" in url or ":8000" in url or url.endswith("/v1") or os.getenv("BATON_USE_ROUTER") in ("1", "true", "yes")
 
     def _log_event(self, event_type: str, payload: Any) -> None:
         """Appends a structured event entry to the session log and chat_latest.log."""
@@ -2678,49 +2693,84 @@ class BatonChatSession:
             # Retrieve currently active tools based on the shelf state
             active_tools = self.get_active_tools_schema()
 
-            payload = {
-                "model": self.model_name,
-                "messages": self.messages,
-                "tools": active_tools,
-                "stream": False,
-                "options": {
+            if self.is_openai_mode:
+                endpoint = (
+                    f"{self.ollama_url}/chat/completions"
+                    if self.ollama_url.endswith("/v1")
+                    else f"{self.ollama_url}/v1/chat/completions"
+                )
+                model_target = self.model_name
+                if model_target.lower() in ("qwen3:14b", "qwen3-14b"):
+                    model_target = "qwen3"
+
+                payload = {
+                    "model": model_target,
+                    "messages": self.messages,
+                    "tools": active_tools,
+                    "stream": False,
                     "temperature": 0.3,
-                },
-            }
+                }
+            else:
+                endpoint = f"{self.ollama_url}/api/chat"
+                payload = {
+                    "model": self.model_name,
+                    "messages": self.messages,
+                    "tools": active_tools,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,
+                    },
+                }
 
             data = None
             try:
-                res = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=120)
+                res = requests.post(endpoint, json=payload, timeout=120)
                 res.raise_for_status()
                 data = res.json()
             except requests.exceptions.ConnectionError:
-                # Self-healing: if Ollama was stopped or crashed, try starting it once
+                # Self-healing: if server was stopped or crashed, try starting it once
                 if getattr(self.orchestrator, "engine_mgr", None):
-                    logger.warning("Ollama connection failed. Attempting to start Ollama...")
-                    started = self.orchestrator.engine_mgr.start_ollama(timeout_sec=10)
+                    if (
+                        self.is_openai_mode
+                        or getattr(self.orchestrator.engine_mgr, "is_router_mode", lambda: False)()
+                    ):
+                        logger.warning("Router connection failed. Attempting to start llama-server router...")
+                        started = self.orchestrator.engine_mgr.start_router(timeout_sec=15)
+                    else:
+                        logger.warning("Ollama connection failed. Attempting to start Ollama...")
+                        started = self.orchestrator.engine_mgr.start_ollama(timeout_sec=10)
+
                     if started:
                         try:
-                            res = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=120)
+                            res = requests.post(endpoint, json=payload, timeout=120)
                             res.raise_for_status()
                             data = res.json()
                         except Exception:
                             data = None
+
                 if not data:
                     err_msg = (
-                        "Could not connect to Ollama at http://127.0.0.1:11434. "
-                        "Make sure Ollama is running (run '.\\scripts\\start_ollama.bat')."
+                        f"Could not connect to LLM backend at {self.ollama_url}. "
+                        "Make sure the router or Ollama is running."
                     )
                     self._log_event("ERROR", err_msg)
                     return err_msg
             except Exception as e:
-                err_msg = f"Error communicating with Ollama: {e}"
+                err_msg = f"Error communicating with LLM backend: {e}"
                 self._log_event("ERROR", err_msg)
                 return err_msg
 
-            message = data.get("message", {})
-            content = message.get("content", "")
-            thinking = message.get("thinking")
-            tool_calls = message.get("tool_calls", [])
+            if "choices" in data:
+                choices = data.get("choices", [])
+                message = choices[0].get("message", {}) if choices else {}
+                content = message.get("content", "")
+                thinking = message.get("reasoning_content") or message.get("thinking")
+                tool_calls = message.get("tool_calls", [])
+            else:
+                message = data.get("message", {})
+                content = message.get("content", "")
+                thinking = message.get("thinking")
+                tool_calls = message.get("tool_calls", [])
 
             # Extract model thinking if present
             if thinking:
