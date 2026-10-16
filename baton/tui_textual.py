@@ -506,14 +506,12 @@ class BatonApp(App):
             tier_badge = "[bold black on dark_orange] IDLE (Standby) [/]"
 
         router_status = status.get("router", {})
-        if router_status.get("online"):
+        router_up = router_status.get("online", False)
+        if router_up:
             engine_summary = "Router (:8080): [bold green]ONLINE (Ornith-35B + Qwen3-14B)[/]"
-            mode_label = "Router Mode"
         else:
-            ollama_stat = "[bold green]ONLINE[/]" if status["ollama"]["online"] else "[dim]STOPPED[/]"
-            colibri_stat = "[bold green]ONLINE[/]" if status["colibri"]["online"] else "[dim]STOPPED[/]"
-            engine_summary = f"Ollama (:11434): {ollama_stat}  |  Colibrì (:8000): {colibri_stat}"
-            mode_label = "Mode A (Interleaved)"
+            engine_summary = "Router (:8080): [red]OFFLINE[/]"
+        mode_label = "Router Mode"
 
         auto_badge = "[bold white on blue] AUTO-TICK: ON [/]" if self.auto_tick_enabled else "[dim]AUTO-TICK: OFF[/]"
 
@@ -660,7 +658,7 @@ class BatonApp(App):
                 content_txt = ""
 
             elapsed_formatted = format_duration(elapsed_sec)
-            tier_label = "System 2 (DeepSeek-V4-Flash)" if task.tier == Tier.SYSTEM_2 else "System 1 (Qwen3:14B)"
+            tier_label = "System 2 (Ornith-35B)" if task.tier == Tier.SYSTEM_2 else "System 1 (Qwen3:14B)"
 
             parts = [
                 f"# ⏳ [IN PROGRESS] {task.title}\n",

@@ -118,21 +118,31 @@ class System2Runner:
 
     def __init__(
         self,
-        colibri_url: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
         model_name: Optional[str] = None,
         artifacts_dir: Optional[Path] = None,
         max_prompt_tokens: int = 1200,
         auto_continue: bool = True,
         max_continuations: int = 3,
         cache_prompt: bool = True,
+        colibri_url: Optional[str] = None,
     ):
-        self.colibri_url = (
-            colibri_url
-            or os.getenv("BATON_COLIBRI_URL")
+        resolved_url = (
+            endpoint_url
+            or colibri_url
+            or os.getenv("BATON_ROUTER_URL")
+            or os.getenv("BATON_API_URL")
             or os.getenv("BATON_SYSTEM2_URL")
-            or "http://127.0.0.1:8000"
+            or os.getenv("BATON_COLIBRI_URL")
+            or "http://127.0.0.1:8080"
         ).rstrip("/")
-        self.model_name = model_name or os.getenv("BATON_SYSTEM2_MODEL")
+        self.endpoint_url = resolved_url
+        self.colibri_url = resolved_url  # Backwards compatibility alias
+        self.model_name = (
+            model_name
+            or os.getenv("BATON_SYSTEM2_MODEL")
+            or "ornith"
+        )
         self._discovered_model: Optional[str] = None
         self.artifacts_dir = artifacts_dir or Path("baton/artifacts/synthesis")
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -159,7 +169,7 @@ class System2Runner:
         if self.model_name:
             return self.model_name
         try:
-            res = requests.get(f"{self.colibri_url}/v1/models", timeout=2.0)
+            res = requests.get(f"{self.endpoint_url}/v1/models", timeout=2.0)
             if res.status_code == 200:
                 data = res.json()
                 models = data.get("data", [])
@@ -230,8 +240,8 @@ class System2Runner:
         initial_reasoning: str = "",
         cache_prompt: Optional[bool] = None,
     ) -> dict[str, Any]:
-        """Calls Colibrì OpenAI-compatible chat completion endpoint with optional SSE streaming."""
-        endpoint = f"{self.colibri_url}/v1/chat/completions"
+        """Calls OpenAI-compatible chat completion endpoint with optional SSE streaming."""
+        endpoint = f"{self.endpoint_url}/v1/chat/completions"
         active_model = self.get_model_id()
         use_cache = self.cache_prompt if cache_prompt is None else cache_prompt
 

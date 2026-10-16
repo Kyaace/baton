@@ -8,10 +8,10 @@
 
 Baton resolves the hardware and cognitive trade-off between fast local copilots and frontier MoE models on a single consumer desktop (Intel i5-13500, 128 GB RAM, NVIDIA RTX 3060 12GB):
 
-* **System 1 (Fast Recon Scout & Verifier):** Powered by **Qwen3:14B** via `llama-server` router or Ollama (~28–33 tok/s). Rapidly navigates offline knowledge databases (Kiwix Wikipedia ZIM) with autonomous typo/miss self-recovery, and synthesizes multi-megabyte datasets into **300-word structured briefing dossiers**.
-* **System 2 (Deep Macro-Planner & Overnight Synthesizer):** Powered by **Ornith-1.5-35B-A3B MoE** (or DeepSeek-V4-Flash) via `llama-server` (~15.5 tok/s). Employs decisive `<think>` reasoning protocols, automatic reasoning code salvage fallbacks, and multi-turn continuation recovery. Tool-blind to protect stability and context budgets.
+* **System 1 (Fast Recon Scout & Verifier):** Powered by **Qwen3:14B** via `llama-server` router (~28–33 tok/s). Rapidly navigates offline knowledge databases (Kiwix Wikipedia ZIM) with autonomous typo/miss self-recovery, and synthesizes multi-megabyte datasets into **300-word structured briefing dossiers**.
+* **System 2 (Deep Macro-Planner & Overnight Synthesizer):** Powered by **Ornith-1.5-35B-A3B MoE** via `llama-server` (~15.5 tok/s). Employs decisive `<think>` reasoning protocols, automatic reasoning code salvage fallbacks, and multi-turn continuation recovery. Tool-blind to protect stability and context budgets.
 * **The Deterministic Mediator:** Pure Python SQLite-backed priority queue (`baton.db`). Manages DAG state transitions (`blocked` $\rightarrow$ `ready` $\rightarrow$ `in_progress` $\rightarrow$ `completed`), bounds context budgets to $\le$ 1,200 tokens, and records production artifacts.
-* **Multi-Model Router & VRAM Envelope:** Single `llama-server` instance on port 8080 dynamically pages models in/out of the RTX 3060 12GB VRAM using Q8_0 KV quantization and single-slot allocations, preventing PCIe paging stalls. Mode A mutual exclusion remains active as a standalone fallback.
+* **Multi-Model Router & VRAM Envelope:** Single `llama-server` instance on port 8080 dynamically pages models in/out of the RTX 3060 12GB VRAM using Q8_0 KV quantization and single-slot allocations, preventing PCIe paging stalls. Model weights remain memory-mapped in 128GB host RAM.
 
 ---
 
@@ -70,11 +70,11 @@ Baton resolves the hardware and cognitive trade-off between fast local copilots 
   * `/alarms`: List scheduled task alarms and countdowns.
   * `/sdr`: Probe connected RTL-SDR hardware and tuner diagnostics instantly.
   * `/tasks [status]`: View the current task priority table instantly without LLM latency.
-  * `/status`: Display queue counts and engine readiness (Ollama & Colibrì).
+  * `/status`: Display queue counts and engine readiness (llama-server router).
   * `/artifacts`: List produced dossiers and synthesis code.
   * `/step [task_id]`: Step and execute highest-priority ready task.
   * `/start [steps]`: Deterministically execute runnable tasks in sequence (default: 5 steps).
-  * `/model <name>`: Switch active Ollama model (e.g. `/model qwen3:14b`).
+  * `/model <name>`: Switch active System 1 model (e.g. `/model qwen3`).
   * `/clear`: Clear terminal screen.
   * `/exit` or `/quit`: Exit chat.
 

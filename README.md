@@ -31,25 +31,17 @@ Baton is completely decoupled and can be customized via environment variables:
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `BATON_ROUTER_URL` | Multi-Model llama-server router endpoint | `http://127.0.0.1:8080` |
-| `BATON_USE_ROUTER` | Force enable (`1`) or disable (`0`) router architecture | Auto-detected |
-| `BATON_OLLAMA_URL` | System 1 / Ollama API endpoint (standalone mode) | `http://127.0.0.1:11434` |
-| `BATON_COLIBRI_URL` | System 2 / OpenAI-compatible endpoint (standalone mode) | `http://127.0.0.1:8000` |
-| `BATON_SYSTEM1_MODEL`| Model name/alias for System 1 | `qwen3` (router) / `qwen3:14b` (Ollama) |
-| `BATON_SYSTEM2_MODEL`| Model name/alias for System 2 | `ornith` (router) / auto-detected |
+| `BATON_SYSTEM1_MODEL`| Model name/alias for System 1 | `qwen3` |
+| `BATON_SYSTEM2_MODEL`| Model name/alias for System 2 | `ornith` |
 | `BATON_ROUTER_START_CMD` | Hook command to start multi-model router | Auto-detects `scripts/run_router.bat` |
 | `BATON_ROUTER_STOP_CMD` | Hook command to stop multi-model router | Auto-detects `scripts/stop_router.bat` |
-| `BATON_OLLAMA_START_CMD` | Optional hook command to start Ollama | System binary fallback |
-| `BATON_OLLAMA_STOP_CMD`  | Optional hook command to stop Ollama  | Process termination fallback |
-| `BATON_COLIBRI_START_CMD`| Hook command to start standalone System 2 | Auto-detects `scripts/run_ornith.bat` |
-| `BATON_COLIBRI_STOP_CMD` | Hook command to stop standalone System 2 | Auto-detects `scripts/stop_ornith.bat` |
 | `BATON_NEWSBOAT_DB`  | Path to custom Newsboat SQLite cache | `baton/data/rss/cache.db` |
 | `BATON_ZIM_PATH`     | Path to custom Kiwix Wikipedia `.zim` archive | Auto-detected / None |
 
-### Launchers & Routers (`scripts/`)
+### Launchers & Scripts (`scripts/`)
 - `scripts/run_router.bat` / `scripts/run_router.sh`: Launches `llama-server` in multi-model router mode on port 8080 with `models_preset.ini`, enabling dynamic VRAM/RAM swapping between Ornith-1.5-35B-A3B (MoE) and Qwen3:14B.
 - `scripts/stop_router.bat` / `scripts/stop_router.sh`: Gracefully terminates the multi-model router.
-- `scripts/run_ornith.bat` / `scripts/run_ornith.sh`: Launches standalone `llama-server` with Ornith-1.5-35B-A3B Q4_K_M on port 8000.
-- `scripts/stop_ornith.bat` / `scripts/stop_ornith.sh`: Gracefully terminates standalone `llama-server`.
+- `scripts/reload_newsboat.bat` / `scripts/reload_newsboat.sh`: Fetches and caches offline RSS articles into the local SQLite store.
 
 ## Quick Start
 

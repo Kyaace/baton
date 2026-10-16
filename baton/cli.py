@@ -19,10 +19,11 @@ def main() -> None:
 
     # Chat
     chat_parser = subparsers.add_parser("chat", help="Launch interactive chat with System 1 Copilot")
-    chat_parser.add_argument("--model", default=None, help="Model name (default: qwen3 for router, qwen3:14b for Ollama)")
+    chat_parser.add_argument("--model", default=None, help="Model name (default: qwen3 for router)")
     chat_parser.add_argument("--coder", action="store_true", help="Shortcut for --model qwen2.5-coder:14b")
-    chat_parser.add_argument("--ollama-url", default=None, help="Backend API base URL (default: router or Ollama)")
-    chat_parser.add_argument("--router-url", default=None, help="llama-server router URL (default: http://127.0.0.1:8080)")
+    chat_parser.add_argument("--url", dest="backend_url", default=None, help="llama-server router URL (default: http://127.0.0.1:8080)")
+    chat_parser.add_argument("--router-url", dest="backend_url", default=None, help=argparse.SUPPRESS)
+    chat_parser.add_argument("--ollama-url", dest="backend_url", default=None, help=argparse.SUPPRESS)
     chat_parser.add_argument(
         "--research",
         action="store_true",
@@ -124,7 +125,7 @@ def main() -> None:
             # Dedicated research mode: load shelf, library (Wikipedia + ZIM archives), and newsboat without Baton queue tools
             initial_bundles = {"core", "library", "newsboat"}
 
-        backend_url = args.router_url or args.ollama_url
+        backend_url = args.backend_url
         chat_session = BatonChatSession(
             orchestrator=orchestrator,
             model_name=model,

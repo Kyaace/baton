@@ -1668,21 +1668,18 @@ class BatonChatSession:
         self._time_tool = time_tool
         self._docs_tool = docs_tool
         self._vault_tool = vault_tool
-        if (
-            getattr(self.engine_mgr, "is_router_mode", lambda: False)()
-            or getattr(self.engine_mgr, "is_router_online", lambda: False)()
-        ):
-            default_url = getattr(self.engine_mgr, "router_url", "http://127.0.0.1:8080")
-            default_model = "qwen3"
-        else:
-            default_url = getattr(self.engine_mgr, "ollama_url", "http://127.0.0.1:11434")
-            default_model = "qwen3:14b"
+        default_url = getattr(self.engine_mgr, "router_url", "http://127.0.0.1:8080")
+        default_model = "qwen3"
 
-        self.ollama_url = (
+        resolved_url = (
             ollama_url
+            or os.getenv("BATON_ROUTER_URL")
+            or os.getenv("BATON_API_URL")
             or os.getenv("BATON_OLLAMA_URL")
             or default_url
         ).rstrip("/")
+        self.endpoint_url = resolved_url
+        self.ollama_url = resolved_url  # Backwards compatibility alias
         self.model_name = (
             model_name
             or os.getenv("BATON_SYSTEM1_MODEL")
@@ -1709,7 +1706,7 @@ class BatonChatSession:
         header = (
             f"================================================================================\n"
             f"BATON CHAT SESSION INITIALIZED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Model: {self.model_name} | Ollama URL: {self.ollama_url}\n"
+            f"Model: {self.model_name} | Router URL: {self.endpoint_url}\n"
             f"Active Bundles: {', '.join(sorted(self.active_bundles))}\n"
             f"Session Log: {self.session_log_path}\n"
             f"================================================================================\n"
@@ -1723,8 +1720,10 @@ class BatonChatSession:
     @property
     def is_openai_mode(self) -> bool:
         """Determines if Chat Copilot targets the llama-server router / OpenAI endpoint."""
-        url = self.ollama_url.lower()
-        return ":8080" in url or ":8000" in url or url.endswith("/v1") or os.getenv("BATON_USE_ROUTER") in ("1", "true", "yes")
+        url = self.endpoint_url.lower()
+        if ":11434" in url and os.getenv("BATON_USE_ROUTER") not in ("1", "true", "yes"):
+            return False
+        return True
 
     def _log_event(self, event_type: str, payload: Any) -> None:
         """Appends a structured event entry to the session log and chat_latest.log."""
@@ -2468,7 +2467,7 @@ class BatonChatSession:
                         getattr(self.orchestrator, "engine_mgr", None)
                         and self.orchestrator.engine_mgr.active_tier == Tier.SYSTEM_2
                     ):
-                        logger.info("Restoring System 1 (Ollama) engine for Chat Copilot...")
+                        logger.info("Restoring System 1 engine for Chat Copilot...")
                         self.orchestrator.engine_mgr.switch_to_tier(Tier.SYSTEM_1)
 
             # Wikipedia Bundle Tools ('wikipedia' / 'library')
@@ -2729,12 +2728,12 @@ class BatonChatSession:
 
         while turn_count < max_turns:
             turn_count += 1
-            # Ensure System 1 (Ollama) engine is active for Chat Copilot
+            # Ensure System 1 engine is active for Chat Copilot
             if (
                 getattr(self.orchestrator, "engine_mgr", None)
                 and self.orchestrator.engine_mgr.active_tier == Tier.SYSTEM_2
             ):
-                logger.info("Chat Copilot active: transitioning engine back to System 1 (Ollama)...")
+                logger.info("Chat Copilot active: transitioning engine back to System 1...")
                 self.orchestrator.engine_mgr.switch_to_tier(Tier.SYSTEM_1)
 
             # Retrieve currently active tools based on the shelf state
@@ -2742,9 +2741,9 @@ class BatonChatSession:
 
             if self.is_openai_mode:
                 endpoint = (
-                    f"{self.ollama_url}/chat/completions"
-                    if self.ollama_url.endswith("/v1")
-                    else f"{self.ollama_url}/v1/chat/completions"
+                    f"{self.endpoint_url}/chat/completions"
+                    if self.endpoint_url.endswith("/v1")
+                    else f"{self.endpoint_url}/v1/chat/completions"
                 )
                 model_target = self.model_name
                 if model_target.lower() in ("qwen3:14b", "qwen3-14b"):
@@ -2758,7 +2757,7 @@ class BatonChatSession:
                     "temperature": 0.3,
                 }
             else:
-                endpoint = f"{self.ollama_url}/api/chat"
+                endpoint = f"{self.endpoint_url}/api/chat"
                 payload = {
                     "model": self.model_name,
                     "messages": self.messages,
@@ -2777,15 +2776,8 @@ class BatonChatSession:
             except requests.exceptions.ConnectionError:
                 # Self-healing: if server was stopped or crashed, try starting it once
                 if getattr(self.orchestrator, "engine_mgr", None):
-                    if (
-                        self.is_openai_mode
-                        or getattr(self.orchestrator.engine_mgr, "is_router_mode", lambda: False)()
-                    ):
-                        logger.warning("Router connection failed. Attempting to start llama-server router...")
-                        started = self.orchestrator.engine_mgr.start_router(timeout_sec=15)
-                    else:
-                        logger.warning("Ollama connection failed. Attempting to start Ollama...")
-                        started = self.orchestrator.engine_mgr.start_ollama(timeout_sec=10)
+                    logger.warning("Router connection failed. Attempting to start llama-server router...")
+                    started = self.orchestrator.engine_mgr.start_router(timeout_sec=15)
 
                     if started:
                         try:
@@ -2797,8 +2789,8 @@ class BatonChatSession:
 
                 if not data:
                     err_msg = (
-                        f"Could not connect to LLM backend at {self.ollama_url}. "
-                        "Make sure the router or Ollama is running."
+                        f"Could not connect to LLM backend at {self.endpoint_url}. "
+                        "Make sure the llama-server router is running."
                     )
                     self._log_event("ERROR", err_msg)
                     return err_msg
@@ -3221,12 +3213,12 @@ class BatonChatSession:
         table.add_row("/notes", "List active ephemeral scratchpad notes on desk with IDs, char counts, and time remaining")
         table.add_row("/note <id>", "Read full text of scratchpad note by ID (e.g. /note 1)")
         table.add_row("/dismiss <id>", "Dismiss scratchpad note from desk immediately")
-        table.add_row("/status", "Show engine statuses (Ollama, Colibrì) and queue counts")
+        table.add_row("/status", "Show engine status (llama-server Router) and queue counts")
         table.add_row("/artifacts", "List generated briefing dossiers and synthesis artifacts")
         table.add_row("/step [task_id]", "Step the queue and execute highest priority ready task")
         table.add_row("/start or /run [max_steps]", "Start or resume autonomous orchestration of ready tasks (default: 5 steps)")
         table.add_row("/help [tool_name] or /toolhelp <name>", "Inspect parameters, accepted aliases, and examples for any tool")
-        table.add_row("/model <name>", f"Change active Ollama model (current: {self.model_name})")
+        table.add_row("/model <name>", f"Change active System 1 model (current: {self.model_name})")
         table.add_row("/sdr", "Probe RTL-SDR hardware and tuner status")
         table.add_row("/adsb [seconds]", "Scan Mode-S ADS-B 1090 MHz aircraft radar")
         table.add_row("/telemetry [preset]", "Listen for sensor telemetry (us_smart_meters, us_tpms, eu_sensors)")
@@ -3290,9 +3282,9 @@ class BatonChatSession:
             f"[blue]COMPLETED:[/] {counts.get('completed', 0)} | "
             f"[red]FAILED:[/] {counts.get('failed', 0)}"
         )
+        router_up = status.get("router_online") or status.get("ollama_online") or status.get("colibri_online")
         console.print(
-            f"[cyan]Ollama:[/] {'[green]ONLINE[/]' if status.get('ollama_online') else '[red]OFFLINE[/]'} | "
-            f"[cyan]Colibrì:[/] {'[green]ONLINE[/]' if status.get('colibri_online') else '[red]OFFLINE[/]'}"
+            f"[cyan]Router (:8080):[/] {'[green]ONLINE[/]' if router_up else '[red]OFFLINE[/]'} [dim](Ornith-35B + Qwen3-14B)[/]"
         )
         active_str = ", ".join(self.active_bundles)
         console.print(f"[magenta]Active Tool Bundles:[/] [bold]{active_str}[/]")

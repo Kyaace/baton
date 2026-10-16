@@ -258,7 +258,7 @@ class System1Runner:
 
     def __init__(
         self,
-        ollama_url: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
         model_name: Optional[str] = None,
         artifacts_dir: Optional[Path] = None,
         zim_tool: Optional[ZimTool] = None,
@@ -267,16 +267,22 @@ class System1Runner:
         sdr_tool: Optional[Any] = None,
         max_repair_retries: int = 3,
         structured_output: bool = True,
+        ollama_url: Optional[str] = None,
     ):
-        self.ollama_url = (
-            ollama_url
+        resolved_url = (
+            endpoint_url
+            or ollama_url
+            or os.getenv("BATON_ROUTER_URL")
+            or os.getenv("BATON_API_URL")
             or os.getenv("BATON_OLLAMA_URL")
-            or "http://127.0.0.1:11434"
+            or "http://127.0.0.1:8080"
         ).rstrip("/")
+        self.endpoint_url = resolved_url
+        self.ollama_url = resolved_url  # Backwards compatibility alias
         self.model_name = (
             model_name
             or os.getenv("BATON_SYSTEM1_MODEL")
-            or "qwen3:14b"
+            or "qwen3"
         )
         self.artifacts_dir = artifacts_dir or Path("baton/artifacts/dossiers")
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -352,8 +358,10 @@ class System1Runner:
     @property
     def is_openai_backend(self) -> bool:
         """Determines if the endpoint is an OpenAI-compatible / llama-server router endpoint."""
-        url = self.ollama_url.lower()
-        return ":8080" in url or ":8000" in url or url.endswith("/v1") or os.getenv("BATON_USE_ROUTER") in ("1", "true", "yes")
+        url = self.endpoint_url.lower()
+        if ":11434" in url and os.getenv("BATON_USE_ROUTER") not in ("1", "true", "yes"):
+            return False
+        return True
 
     def generate(
         self,
@@ -374,9 +382,9 @@ class System1Runner:
         # ---------------------------------------------------------------------
         if self.is_openai_backend:
             endpoint = (
-                f"{self.ollama_url}/chat/completions"
-                if self.ollama_url.endswith("/v1")
-                else f"{self.ollama_url}/v1/chat/completions"
+                f"{self.endpoint_url}/chat/completions"
+                if self.endpoint_url.endswith("/v1")
+                else f"{self.endpoint_url}/v1/chat/completions"
             )
             messages: list[dict[str, str]] = []
             if system_prompt:
@@ -517,7 +525,7 @@ class System1Runner:
         if not stream:
             if self._cancel_requested:
                 raise TaskCancelledError("System 1 generation stopped by user.")
-            res = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=timeout)
+            res = requests.post(f"{self.endpoint_url}/api/generate", json=payload, timeout=timeout)
             res.raise_for_status()
             data = res.json()
             elapsed = time.time() - t0
@@ -528,7 +536,7 @@ class System1Runner:
             }
 
         try:
-            res = requests.post(f"{self.ollama_url}/api/generate", json=payload, stream=True, timeout=timeout)
+            res = requests.post(f"{self.endpoint_url}/api/generate", json=payload, stream=True, timeout=timeout)
             res.raise_for_status()
             self._active_response = res
 

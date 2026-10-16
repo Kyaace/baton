@@ -27,7 +27,9 @@ async def test_tui_mount_and_render_in_progress(tmp_path: Path):
         def get_status(self):
             return {
                 "active_tier": "system_2",
-                "ollama": {"online": False},
+                "router_mode": True,
+                "router": {"online": True},
+                "ollama": {"online": True},
                 "colibri": {"online": True},
             }
 

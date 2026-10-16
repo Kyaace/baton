@@ -66,26 +66,18 @@ class BatonTUI:
             if rt.tier == Tier.SYSTEM_1:
                 tier_badge = f"[bold white on green] RUNNING: S1 (Qwen3:14B){prog_info} [/]"
             else:
-                tier_badge = f"[bold white on magenta] RUNNING: S2 (DeepSeek-V4-Flash){prog_info} [/]"
+                tier_badge = f"[bold white on magenta] RUNNING: S2 (Ornith-35B){prog_info} [/]"
         elif active == "SYSTEM_1":
             tier_badge = "[bold white on green] ACTIVE: SYSTEM 1 (Qwen3:14B) [/]"
         elif active == "SYSTEM_2":
-            tier_badge = "[bold white on magenta] ACTIVE: SYSTEM 2 (DeepSeek-V4-Flash) [/]"
+            tier_badge = "[bold white on magenta] ACTIVE: SYSTEM 2 (Ornith-35B) [/]"
         else:
-            tier_badge = "[bold black on yellow] IDLE (Mode A Standby) [/]"
-
-        ollama_stat = (
-            "[green]ONLINE[/]" if status["ollama"]["online"] else "[dim]STOPPED[/]"
-        )
-        colibri_stat = (
-            "[green]ONLINE[/]" if status["colibri"]["online"] else "[dim]STOPPED[/]"
-        )
+            tier_badge = "[bold black on yellow] IDLE (Standby) [/]"
 
         router_status = status.get("router", {})
-        if router_status.get("online"):
-            engine_stat_line = "Router (:8080): [green]ONLINE (Ornith-35B + Qwen3-14B)[/]   |   Mode: [cyan]Router Mode (Dynamic Paging)[/]"
-        else:
-            engine_stat_line = f"Ollama (:11434): {ollama_stat}   |   Colibrì (:8000): {colibri_stat}   |   Mode: [cyan]Mode A (Interleaved)[/]"
+        router_up = router_status.get("online", False)
+        router_stat = "[green]ONLINE (Ornith-35B + Qwen3-14B)[/]" if router_up else "[red]OFFLINE[/]"
+        engine_stat_line = f"Router (:8080): {router_stat}   |   Mode: [cyan]Router Mode (Dynamic Paging)[/]"
 
         header_text = Text.from_markup(
             f"[bold cyan]BATON[/] [dim]|[/] Dual-Speed System 1 / System 2 Orchestrator\n"

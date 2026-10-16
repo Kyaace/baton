@@ -36,6 +36,8 @@ class JobStatus(str, Enum):
 
 
 class EngineType(str, Enum):
+    ROUTER = "router"
+    LLAMA_SERVER = "llama_server"
     OLLAMA = "ollama"
     COLIBRI = "colibri"
 
