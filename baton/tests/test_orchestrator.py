@@ -10,6 +10,9 @@ from baton.orchestrator import Orchestrator
 
 
 class MockSystem1:
+    def __init__(self):
+        self.sandbox_tool = MagicMock()
+
     def execute_task(self, task, upstream):
         art_path = f"artifacts/{task.task_id}.md"
         return f"Mock Dossier for {task.title}", art_path, 150, 1.2
@@ -19,6 +22,10 @@ class MockSystem2:
     def synthesize(self, task, upstream):
         art_path = f"artifacts/{task.task_id}.py"
         return f"Mock Code for {task.title}", art_path, 2400, 45.0
+
+    def repair_code(self, task, sandbox_tool, upstream_dossiers=None, progress_callback=None):
+        art_path = f"artifacts/{task.task_id}.py"
+        return f"Mock Repair for {task.title}", art_path, 800, 10.0, True
 
     def plan_project(self, project, goal):
         return DAGPlan(
@@ -274,6 +281,79 @@ def test_orchestrator_auto_repair_escalation(tmp_path: Path):
     assert deploy_after.status == TaskStatus.READY
 
 
+def test_orchestrator_repair_preserves_context_and_cleans_title(tmp_path: Path):
+    """Verify that repair tasks inherit original prompt specs, prior code, clean titles, and completed recon deps."""
+    from baton.models import VerificationFailedError
+
+    db = Database(tmp_path / "repair_context_baton.db")
+    engine_mgr = MockEngineManager()
+    sys1 = MockSystem1()
+    sys2 = MockSystem2()
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=sys1, system2=sys2, auto_verify=False, auto_repair=True)
+
+    job = db.create_job("Context Preservation Job", "Verify full context retention")
+
+    # 1. Recon task (completed)
+    recon = db.create_task(
+        title="Recon Specs",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_RECON,
+        task_id="recon_1",
+        job_id=job.job_id,
+        priority=10,
+    )
+    db.mark_task_completed(recon.task_id, result_payload="Key Controls: WASD and default Low Thrust.")
+
+    # 2. Original synthesis task
+    orig = db.create_task(
+        title="Generate Pygame Lunar Lander Game",
+        tier=Tier.SYSTEM_2,
+        task_type=TaskType.DEEP_SYNTHESIS,
+        task_id="synth_lunar",
+        job_id=job.job_id,
+        prompt_template="Create Lunar Lander in Pygame with WASD controls and low thrust default.",
+        depends_on=["recon_1"],
+        priority=8,
+    )
+    db.mark_task_completed(orig.task_id, result_payload="Code written", artifact_path="baton/artifacts/synthesis/lunar.py")
+
+    # 3. Verification task
+    verify = db.create_task(
+        title="Verify: Generate Pygame Lunar Lander Game",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_VERIFY,
+        task_id="verify_synth_lunar",
+        job_id=job.job_id,
+        prompt_template="Verify lunar lander.",
+        depends_on=["synth_lunar"],
+        priority=9,
+    )
+
+    sys1.execute_task = MagicMock(side_effect=VerificationFailedError(
+        message="Simulation crashed",
+        failure_trace="ZeroDivisionError: division by zero in physics.py line 42",
+        target_code="def update(): return 1 / 0",
+    ))
+
+    # Step orchestrator on verify task
+    t_v = orch.step()
+    assert t_v is not None
+    assert t_v.task_id == "verify_synth_lunar"
+    assert t_v.status == TaskStatus.FAILED
+
+    # Check repair task
+    repair = db.get_task("repair_verify_synth_lunar")
+    assert repair is not None
+    assert repair.status == TaskStatus.READY
+    assert repair.title == "Repair: Generate Pygame Lunar Lander Game"
+    assert "### Original Mission Specifications:" in repair.prompt_template
+    assert "Create Lunar Lander in Pygame with WASD controls and low thrust default." in repair.prompt_template
+    assert "ZeroDivisionError: division by zero" in repair.prompt_template
+    assert "### Prior Implementation Code to Fix:" in repair.prompt_template
+    assert "def update(): return 1 / 0" in repair.prompt_template
+    assert repair.depends_on == ["recon_1"]
+
+
 def test_tier_sticky_scheduling_drains_warm_system1(tmp_path: Path):
     """Verify that when System 1 is warm, all runnable System 1 tasks drain before switching to System 2,
     even if the System 2 task has a higher scalar priority."""
@@ -434,6 +514,44 @@ def test_orchestrator_in_progress_concurrency_lock(tmp_path: Path):
     assert stepped is not None
     assert stepped.task_id == t2.task_id
     assert stepped.status == TaskStatus.COMPLETED
+
+
+def test_orchestrator_repair_task_dispatches_to_system2_repair(tmp_path: Path):
+    """Verify that when Orchestrator steps a repair task, it dispatches to system2.repair_code with sandbox."""
+    db = Database(tmp_path / "dispatch_repair_baton.db")
+    engine_mgr = MockEngineManager()
+    sys1 = MockSystem1()
+    sys2 = MockSystem2()
+    orch = Orchestrator(db=db, engine_manager=engine_mgr, system1=sys1, system2=sys2, auto_verify=True, auto_repair=True)
+
+    job = db.create_job("Dispatch Job", "Verify dispatch")
+    repair_task = db.create_task(
+        title="Repair: Game Loop",
+        tier=Tier.SYSTEM_2,
+        task_type=TaskType.DEEP_SYNTHESIS,
+        task_id="repair_verify_game",
+        job_id=job.job_id,
+        prompt_template="Fix game loop",
+        tool_params={"target_artifact": "game.py", "is_repair": True},
+        priority=10,
+    )
+
+    sys2.repair_code = MagicMock(return_value=(
+        "Fixed line 10 in game.py (Code 0)",
+        str(tmp_path / "game.py"),
+        500,
+        2.5,
+        True,
+    ))
+
+    t = orch.step()
+    assert t is not None
+    assert t.task_id == "repair_verify_game"
+    assert t.status == TaskStatus.COMPLETED
+    assert sys2.repair_code.call_count == 1
+    # Verify auto_verify was NOT re-injected on repair task
+    downstream = db.get_downstream_tasks("repair_verify_game")
+    assert len(downstream) == 0
 
 
 

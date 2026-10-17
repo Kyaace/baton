@@ -1,5 +1,6 @@
 """Unit tests for System 2 Colibrì 429 exponential backoff and retry logic."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 import requests
@@ -124,4 +125,130 @@ def test_system2_salvages_code_from_reasoning_monologue(tmp_path):
         content = Path(art_path).read_text(encoding="utf-8")
         assert "def test_salvaged():" in content
         assert "return 42" in content
+
+
+def test_system2_repair_code_replaces_lines_and_succeeds(tmp_path: Path):
+    """Verify that System2Runner.repair_code reads code, executes replace_lines, and exits on Code 0."""
+    from baton.models import Task, TaskType, Tier
+    from baton.tools.sandbox import SandboxTool
+
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox")
+    runner = System2Runner(artifacts_dir=tmp_path / "artifacts")
+
+    # Create broken file in sandbox
+    broken_code = "def compute():\n    return 1 / 0\n\nif __name__ == '__main__':\n    print(compute())\n"
+    sandbox.write_file("calc.py", broken_code)
+
+    task = Task(
+        task_id="repair_verify_calc",
+        job_id="job_1",
+        title="Repair: Compute Calc",
+        tier=Tier.SYSTEM_2,
+        task_type=TaskType.DEEP_SYNTHESIS,
+        prompt_template="ZeroDivisionError on line 2",
+        tool_params={"target_artifact": "calc.py", "is_repair": True},
+    )
+
+    # Turn 1: model calls sandbox_read_file
+    turn1_res = {
+        "content": "Let me inspect the file around line 2.",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "sandbox_read_file",
+                    "arguments": {"filename": "calc.py", "start_line": 1, "end_line": 5},
+                },
+            }
+        ],
+        "tokens_generated": 50,
+        "elapsed_seconds": 0.2,
+    }
+
+    # Turn 2: model calls sandbox_replace_lines with fix
+    turn2_res = {
+        "content": "Replacing line 2 with working logic.",
+        "tool_calls": [
+            {
+                "id": "call_2",
+                "type": "function",
+                "function": {
+                    "name": "sandbox_replace_lines",
+                    "arguments": {
+                        "filename": "calc.py",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "replacement_content": "    return 100",
+                    },
+                },
+            }
+        ],
+        "tokens_generated": 60,
+        "elapsed_seconds": 0.2,
+    }
+
+    with patch.object(runner, "chat_completion", side_effect=[turn1_res, turn2_res]) as mock_chat:
+        summary, art_path, tokens, elapsed, success = runner.repair_code(task, sandbox_tool=sandbox)
+
+        assert success is True
+        assert mock_chat.call_count == 2
+        assert "PASSED (Code 0)" in summary
+
+        # Verify code on disk was patched and runs
+        read_res = sandbox.read_file("calc.py", max_chars=None)
+        assert "return 100" in read_res["content"]
+        assert "return 1 / 0" not in read_res["content"]
+
+
+def test_system2_repair_code_exhausts_edit_budget(tmp_path: Path):
+    """Verify that System2Runner.repair_code respects the 3-edit budget and exits on failure."""
+    from baton.models import Task, TaskType, Tier
+    from baton.tools.sandbox import SandboxTool
+
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox")
+    runner = System2Runner(artifacts_dir=tmp_path / "artifacts")
+
+    broken_code = "def compute():\n    return 1 / 0\n\nif __name__ == '__main__':\n    print(compute())\n"
+    sandbox.write_file("calc_fail.py", broken_code)
+
+    task = Task(
+        task_id="repair_verify_calc_fail",
+        job_id="job_1",
+        title="Repair: Compute Calc Fail",
+        tier=Tier.SYSTEM_2,
+        task_type=TaskType.DEEP_SYNTHESIS,
+        prompt_template="ZeroDivisionError",
+        tool_params={"target_artifact": "calc_fail.py", "is_repair": True},
+    )
+
+    # 3 broken edits that still crash
+    broken_turn = {
+        "content": "Trying another broken edit",
+        "tool_calls": [
+            {
+                "id": "call_fail",
+                "type": "function",
+                "function": {
+                    "name": "sandbox_replace_lines",
+                    "arguments": {
+                        "filename": "calc_fail.py",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "replacement_content": "    raise ValueError('still broken')",
+                    },
+                },
+            }
+        ],
+        "tokens_generated": 30,
+        "elapsed_seconds": 0.1,
+    }
+
+    with patch.object(runner, "chat_completion", return_value=broken_turn) as mock_chat:
+        summary, art_path, tokens, elapsed, success = runner.repair_code(
+            task, sandbox_tool=sandbox, max_edits=3
+        )
+        assert success is False
+        assert mock_chat.call_count == 3
+        assert "exhausted 3 edit attempts" in summary
 

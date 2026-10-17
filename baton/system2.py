@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -110,6 +111,20 @@ STATIC_SYNTHESIS_SYSTEM_PROMPT = (
     "- Once decided, immediately emit </think> and output the complete production code wrapped in ```python ... ```.\n"
     "- Include zero placeholders, ellipses (...), or pseudo-code.\n"
     "- Every function, formula, and class must be fully written and functional."
+)
+
+STATIC_REPAIR_SYSTEM_PROMPT = (
+    "You are Baton System 2: Principal Debugger & Repair Engineer.\n"
+    "You are repairing failing code in the sandbox using targeted developer tools.\n"
+    "Available JIT Developer Tools:\n"
+    "- `sandbox_read_file(filename, start_line, end_line)`: Inspect the error location and surrounding lines.\n"
+    "- `sandbox_replace_lines(filename, start_line, end_line, replacement_content)`: Patch only the broken lines.\n"
+    "- `sandbox_write_file(filename, content)`: Overwrite the complete file if a full rewrite is required.\n"
+    "Execution Protocol:\n"
+    "1. Read the lines around the error to understand the bug and context.\n"
+    "2. Issue a targeted `sandbox_replace_lines` call. The sandbox will automatically execute the file and return compiler/runtime results.\n"
+    "3. When verification passes (Code 0), the repair is complete.\n"
+    "Think decisively in <think>, then execute your tool calls."
 )
 
 
@@ -233,6 +248,7 @@ class System2Runner:
         max_tokens: Optional[int] = None,
         timeout: float | tuple[float, float] | None = (120.0, 600.0),
         stream: bool = True,
+        tools: Optional[list[dict[str, Any]]] = None,
         progress: Optional[TaskProgress] = None,
         progress_callback: Optional[Callable[[TaskProgress], None]] = None,
         initial_tokens: int = 0,
@@ -251,6 +267,8 @@ class System2Runner:
             "temperature": temperature,
             "stream": stream,
         }
+        if tools:
+            payload["tools"] = tools
         if use_cache:
             # Tell llama.cpp / Colibri to pin and reuse prompt KV cache
             payload["cache_prompt"] = True
@@ -275,14 +293,18 @@ class System2Runner:
             elapsed = time.time() - t0
 
             choice = data.get("choices", [{}])[0]
-            content = choice.get("message", {}).get("content", "").strip()
+            msg = choice.get("message", {})
+            content = msg.get("content", "").strip() if msg.get("content") else ""
+            reasoning = msg.get("reasoning_content") or msg.get("thinking") or ""
+            tool_calls = msg.get("tool_calls", [])
             finish_reason = choice.get("finish_reason")
             usage = data.get("usage", {})
             tokens = usage.get("completion_tokens", 0)
 
             return {
                 "content": content,
-                "reasoning_content": "",
+                "reasoning_content": reasoning,
+                "tool_calls": tool_calls,
                 "tokens_generated": tokens,
                 "elapsed_seconds": elapsed,
                 "finish_reason": finish_reason,
@@ -413,6 +435,7 @@ class System2Runner:
         return {
             "content": final_content,
             "reasoning_content": final_reasoning,
+            "tool_calls": [],
             "tokens_generated": tokens_count,
             "elapsed_seconds": elapsed,
             "finish_reason": finish_reason,
@@ -762,3 +785,275 @@ class System2Runner:
             cont_note = f" (across {continuations_performed + 1} turns)" if continuations_performed > 0 else ""
             summary = f"Synthesized {total_tokens} tokens into {artifact_path.name} in {elapsed:.1f}s{cont_note}"
         return summary, str(artifact_path), total_tokens, elapsed
+
+    @staticmethod
+    def _extract_tool_calls(content: str, raw_tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Extracts tool calls from native OpenAI format or embedded text fallback."""
+        if raw_tool_calls:
+            return raw_tool_calls
+
+        calls: list[dict[str, Any]] = []
+        if not content:
+            return calls
+
+        # 1. Check for <tool_call> ... </tool_call>
+        for match in re.finditer(r"<tool_call>\s*({[\s\S]*?})\s*</tool_call>", content):
+            try:
+                data = json.loads(match.group(1))
+                fn_name = data.get("name")
+                args = data.get("arguments", data.get("params", data))
+                if fn_name:
+                    calls.append({
+                        "id": f"call_{uuid.uuid4().hex[:6]}",
+                        "type": "function",
+                        "function": {"name": fn_name, "arguments": args},
+                    })
+            except Exception:
+                pass
+
+        # 2. Check for code fence ```tool_call ... ```
+        if not calls:
+            for match in re.finditer(r"```tool_call\s*({[\s\S]*?})\s*```", content):
+                try:
+                    data = json.loads(match.group(1))
+                    fn_name = data.get("name")
+                    args = data.get("arguments", data)
+                    if fn_name:
+                        calls.append({
+                            "id": f"call_{uuid.uuid4().hex[:6]}",
+                            "type": "function",
+                            "function": {"name": fn_name, "arguments": args},
+                        })
+                except Exception:
+                    pass
+
+        return calls
+
+    def repair_code(
+        self,
+        task: Task,
+        sandbox_tool: Any,
+        upstream_dossiers: Optional[list[dict[str, Any]]] = None,
+        progress_callback: Optional[Callable[[TaskProgress], None]] = None,
+        max_edits: int = 3,
+        max_reads: int = 8,
+        max_turns: int = 12,
+    ) -> tuple[str, Optional[str], int, float, bool]:
+        """
+        Targeted Repair Loop for System 2 using the JIT Developer Tool Shelf.
+        Exposes sandbox_read_file, sandbox_replace_lines, and sandbox_write_file.
+        Automatically evaluates code execution after each edit and terminates
+        immediately when returncode == 0.
+        Returns: (summary, artifact_path, total_tokens, elapsed_seconds, success)
+        """
+        from baton.tools.sandbox import DEVELOPER_TOOL_SCHEMAS
+
+        t0 = time.time()
+        logger.info("System 2 entering JIT Developer Repair Loop for task '%s'...", task.task_id)
+
+        # Resolve target filename in sandbox
+        target_filename = None
+        if task.tool_params and "target_artifact" in task.tool_params:
+            target_filename = Path(task.tool_params["target_artifact"]).name
+        elif task.artifact_path:
+            target_filename = Path(task.artifact_path).name
+        elif error_target_match := re.search(r"### Execution \(`([^`]+)`\)", task.prompt_template or ""):
+            target_filename = error_target_match.group(1)
+        elif py_match := re.search(r"\b([a-zA-Z0-9_\-]+\.py)\b", task.prompt_template or ""):
+            target_filename = py_match.group(1)
+
+        user_content = (
+            f"# Mission Repair Directive: {task.title}\n\n"
+            f"{task.prompt_template or ''}\n\n"
+            f"Target Sandbox File: `{target_filename or 'target.py'}`\n"
+            f"You have a budget of up to {max_edits} edit attempts and {max_reads} file reads.\n"
+            f"First inspect the relevant lines using `sandbox_read_file`, then apply a targeted patch using `sandbox_replace_lines`."
+        )
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": STATIC_REPAIR_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+
+        edits_used = 0
+        reads_used = 0
+        total_tokens = 0
+        last_summary = ""
+        artifact_path: Optional[str] = (
+            str(sandbox_tool._resolve_safe_path(target_filename))
+            if target_filename and hasattr(sandbox_tool, "_resolve_safe_path")
+            else task.artifact_path
+        )
+
+        progress = TaskProgress(
+            task_id=task.task_id,
+            tier=Tier.SYSTEM_2,
+            started_at=t0,
+        )
+
+        for turn in range(1, max_turns + 1):
+            if self._cancel_requested:
+                raise TaskCancelledError("System 2 generation stopped by user.")
+
+            logger.info(
+                "System 2 repair turn %d/%d (edits used: %d/%d, reads used: %d/%d)...",
+                turn,
+                max_turns,
+                edits_used,
+                max_edits,
+                reads_used,
+                max_reads,
+            )
+
+            res = self.chat_completion(
+                messages,
+                temperature=0.2,
+                timeout=(60.0, 300.0),
+                stream=False,
+                tools=DEVELOPER_TOOL_SCHEMAS,
+                progress=progress,
+                progress_callback=progress_callback,
+            )
+
+            content = res.get("content", "") or ""
+            raw_tool_calls = res.get("tool_calls", [])
+            total_tokens += res.get("tokens_generated", 0)
+
+            tool_calls = self._extract_tool_calls(content, raw_tool_calls)
+
+            if tool_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                })
+
+                for tc in tool_calls:
+                    fn_info = tc.get("function", {})
+                    fn_name = fn_info.get("name", "")
+                    raw_args = fn_info.get("arguments", {})
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+
+                    # Default filename if missing in args
+                    if target_filename and "filename" not in args:
+                        args["filename"] = target_filename
+
+                    tc_id = tc.get("id") or f"call_{turn}"
+
+                    if fn_name in ("sandbox_read_file", "read_file"):
+                        if reads_used >= max_reads:
+                            out = f"Error: Read budget exhausted ({max_reads} calls used). Proceed to replace_lines."
+                        else:
+                            reads_used += 1
+                            out = sandbox_tool.execute("sandbox_read_file", args)
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": out,
+                        })
+
+                    elif fn_name in ("sandbox_replace_lines", "replace_lines"):
+                        if edits_used >= max_edits:
+                            out = f"Error: Edit budget exhausted ({max_edits} edits used)."
+                        else:
+                            edits_used += 1
+                            out = sandbox_tool.execute("sandbox_replace_lines", args)
+                            fn = args.get("filename") or target_filename
+                            if fn and hasattr(sandbox_tool, "_resolve_safe_path"):
+                                artifact_path = str(sandbox_tool._resolve_safe_path(fn))
+
+                            last_summary = out
+                            if "PASSED (Code 0)" in out:
+                                elapsed = time.time() - t0
+                                logger.info(
+                                    "System 2 repair verified successfully on edit %d/%d! Exiting repair loop deterministically.",
+                                    edits_used,
+                                    max_edits,
+                                )
+                                return (out, artifact_path, total_tokens, elapsed, True)
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": out,
+                        })
+
+                    elif fn_name in ("sandbox_write_file", "write_file"):
+                        if edits_used >= max_edits:
+                            out = f"Error: Edit budget exhausted ({max_edits} edits used)."
+                        else:
+                            edits_used += 1
+                            out = sandbox_tool.execute("sandbox_write_file", args)
+                            fn = args.get("filename") or target_filename
+                            if fn and hasattr(sandbox_tool, "_resolve_safe_path"):
+                                artifact_path = str(sandbox_tool._resolve_safe_path(fn))
+
+                            last_summary = out
+                            if "PASSED (Code 0)" in out:
+                                elapsed = time.time() - t0
+                                logger.info(
+                                    "System 2 repair verified successfully via full-file write on edit %d/%d! Exiting repair loop.",
+                                    edits_used,
+                                    max_edits,
+                                )
+                                return (out, artifact_path, total_tokens, elapsed, True)
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": out,
+                        })
+
+                    if edits_used >= max_edits:
+                        break
+
+            else:
+                # No tool calls emitted: check if model provided a full code block directly
+                code_match = re.search(r"```(?:python)?\s*\n(.*?)```", content, re.DOTALL)
+                if code_match and target_filename:
+                    new_code = code_match.group(1).strip()
+                    if edits_used < max_edits:
+                        edits_used += 1
+                        out = sandbox_tool.execute("sandbox_write_file", {"filename": target_filename, "content": new_code})
+                        if hasattr(sandbox_tool, "_resolve_safe_path"):
+                            artifact_path = str(sandbox_tool._resolve_safe_path(target_filename))
+                        last_summary = out
+                        if "PASSED (Code 0)" in out:
+                            elapsed = time.time() - t0
+                            logger.info("System 2 repair verified successfully via direct code output on edit %d/%d!", edits_used, max_edits)
+                            return (out, artifact_path, total_tokens, elapsed, True)
+
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({
+                            "role": "user",
+                            "content": f"The full file edit was applied but verification failed:\n{out}\nRemaining edits: {max_edits - edits_used}. Please use `sandbox_replace_lines` to target the specific failing line.",
+                        })
+                        if edits_used >= max_edits:
+                            break
+                        continue
+
+                # Plain conversational response without action
+                messages.append({"role": "assistant", "content": content})
+                messages.append({
+                    "role": "user",
+                    "content": "Please proceed by using `sandbox_read_file` to inspect lines or `sandbox_replace_lines` to apply your fix.",
+                })
+
+            if edits_used >= max_edits:
+                logger.warning("System 2 repair exhausted edit budget (%d edits used) without passing verification.", edits_used)
+                break
+
+        elapsed = time.time() - t0
+        summary = (
+            f"System 2 repair exhausted {edits_used} edit attempts without passing verification.\n\n{last_summary}".strip()
+            if last_summary
+            else f"System 2 repair exhausted {edits_used} edit attempts without passing verification."
+        )
+        return (
+            summary,
+            artifact_path,
+            total_tokens,
+            elapsed,
+            False,
+        )

@@ -207,15 +207,21 @@ class SandboxTool:
         existing_path = env.get("PATH", "")
         env["PATH"] = f"{py_dir}{sep}{scripts_dir}{sep}{existing_path}"
 
-        # Injects sandbox dir and project root into PYTHONPATH
+        # Injects sandbox hooks, sandbox dir and project root into PYTHONPATH
         project_root = str(Path(__file__).resolve().parent.parent.parent)
         sandbox_path = str(self.sandbox_dir.resolve())
+        hooks_path = str((Path(__file__).resolve().parent / "_sandbox_hooks").resolve())
         existing_pypath = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (
-            f"{sandbox_path}{sep}{project_root}{sep}{existing_pypath}"
+            f"{hooks_path}{sep}{sandbox_path}{sep}{project_root}{sep}{existing_pypath}"
             if existing_pypath
-            else f"{sandbox_path}{sep}{project_root}"
+            else f"{hooks_path}{sep}{sandbox_path}{sep}{project_root}"
         )
+
+        # Headless driver defaults for sandbox verification
+        env.setdefault("SDL_VIDEODRIVER", "dummy")
+        env.setdefault("SDL_AUDIODRIVER", "dummy")
+        env.setdefault("BATON_HEADLESS_SMOKE_TEST", "1")
         return env
 
     def _resolve_safe_path(self, filename: str) -> Path:
@@ -279,18 +285,80 @@ class SandboxTool:
     # 2. File Staging & Reading
     # -------------------------------------------------------------------------
 
-    def write_file(self, filename: str, content: str) -> dict[str, Any]:
-        """Writes source code or test file into the sandbox."""
+    def write_file(self, filename: str, content: str, auto_eval: bool = False) -> dict[str, Any]:
+        """Writes source code or test file into the sandbox. Optionally triggers automatic eval."""
         try:
             target = self._resolve_safe_path(filename)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-            return {
+            res: dict[str, Any] = {
                 "success": True,
                 "path": str(target),
                 "filename": filename,
                 "size_bytes": len(content.encode("utf-8")),
             }
+            if auto_eval:
+                res["eval_result"] = self.eval_code(content, filename=filename)
+            return res
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def replace_lines(
+        self,
+        filename: str,
+        start_line: int,
+        end_line: int,
+        replacement_content: str,
+        auto_eval: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Replaces lines [start_line, end_line] (inclusive, 1-indexed) in filename
+        with replacement_content, leaving all lines before and after intact.
+        If auto_eval=True, immediately executes the resulting file in the sandbox
+        and returns the evaluation status.
+        """
+        try:
+            target = self._resolve_safe_path(filename)
+            if not target.exists() or not target.is_file():
+                return {"success": False, "error": f"File '{filename}' does not exist in sandbox."}
+
+            raw_text = target.read_text(encoding="utf-8", errors="replace")
+            lines = raw_text.splitlines(keepends=True)
+            total_lines = len(lines)
+
+            req_start = max(1, int(start_line))
+            req_end = min(total_lines, max(req_start, int(end_line)))
+
+            if req_start > total_lines:
+                return {
+                    "success": False,
+                    "error": f"start_line ({req_start}) exceeds total lines in file ({total_lines}).",
+                }
+
+            norm_replacement = replacement_content
+            if norm_replacement and not norm_replacement.endswith(("\n", "\r\n")):
+                norm_replacement += "\n"
+
+            before = "".join(lines[: req_start - 1])
+            after = "".join(lines[req_end:])
+            new_content = before + norm_replacement + after
+
+            target.write_text(new_content, encoding="utf-8")
+            new_lines = new_content.splitlines()
+
+            result: dict[str, Any] = {
+                "success": True,
+                "filename": filename,
+                "path": str(target),
+                "lines_replaced": f"{req_start}-{req_end}",
+                "original_total_lines": total_lines,
+                "new_total_lines": len(new_lines),
+            }
+
+            if auto_eval:
+                result["eval_result"] = self.eval_code(new_content, filename=filename)
+
+            return result
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -583,12 +651,45 @@ class SandboxTool:
         elif name in ("sandbox_write_file", "write_file"):
             fn = params.get("filename")
             content = params.get("content", "")
+            auto_eval = params.get("auto_eval", True)
             if not fn:
                 return "Error: 'filename' parameter is required."
-            res = self.write_file(fn, content)
+            res = self.write_file(fn, content, auto_eval=auto_eval)
             if res.get("success"):
-                return f"Successfully wrote {res['size_bytes']} bytes to sandbox file `{fn}`."
+                eval_str = ""
+                if "eval_result" in res:
+                    ev = res["eval_result"]
+                    st = "PASSED (Code 0)" if ev.get("success") else f"FAILED (Code {ev.get('returncode')})"
+                    eval_str = f"\n- **Automatic Sandbox Verification:** {st}\n```text\n{ev.get('output', '').strip()}\n```"
+                return f"Successfully wrote {res['size_bytes']} bytes to sandbox file `{fn}`.{eval_str}"
             return f"Error writing file `{fn}`: {res.get('error')}"
+
+        elif name in ("sandbox_replace_lines", "replace_lines"):
+            fn = params.get("filename")
+            start_l = params.get("start_line")
+            end_l = params.get("end_line")
+            replacement = params.get("replacement_content", "")
+            if not fn:
+                return "Error: 'filename' parameter is required."
+            if start_l is None or end_l is None:
+                return "Error: 'start_line' and 'end_line' are required integer parameters."
+
+            res = self.replace_lines(fn, int(start_l), int(end_l), replacement, auto_eval=True)
+            if not res.get("success"):
+                return f"Error replacing lines in `{fn}`: {res.get('error')}"
+
+            eval_res = res.get("eval_result", {})
+            eval_status = "PASSED (Code 0)" if eval_res.get("success") else f"FAILED (Code {eval_res.get('returncode')})"
+            eval_out = eval_res.get("output", "").strip()
+            eval_err = f"\n**Error:** {eval_res.get('error')}" if eval_res.get("error") else ""
+
+            return (
+                f"### Line Replacement in `{fn}` (Lines {res.get('lines_replaced')}): SUCCESS\n"
+                f"- **New Total Lines:** {res.get('new_total_lines')}\n"
+                f"- **Automatic Sandbox Verification:** {eval_status}\n"
+                f"{eval_err}\n"
+                f"```text\n{eval_out}\n```".strip()
+            )
 
         elif name in ("sandbox_read_file", "read_file"):
             fn = params.get("filename")
@@ -617,3 +718,55 @@ class SandboxTool:
 
         else:
             return f"Error: Unknown Sandbox tool '{tool_name}'."
+
+
+DEVELOPER_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "sandbox_read_file",
+            "description": "Read lines from a file in the sandbox. Use start_line and end_line to inspect specific error sites or function contexts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "The relative filename in the sandbox (e.g., 'lunar_lander.py')."},
+                    "start_line": {"type": "integer", "description": "1-indexed starting line number to read."},
+                    "end_line": {"type": "integer", "description": "1-indexed ending line number to read."}
+                },
+                "required": ["filename"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sandbox_replace_lines",
+            "description": "Replace a specific range of lines [start_line, end_line] (inclusive, 1-indexed) in a sandbox file with new replacement code. Leaves all code before and after intact. Automatically triggers sandbox execution to verify returncode.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "The relative filename in the sandbox to edit."},
+                    "start_line": {"type": "integer", "description": "1-indexed starting line number of the target block to replace."},
+                    "end_line": {"type": "integer", "description": "1-indexed ending line number of the target block to replace."},
+                    "replacement_content": {"type": "string", "description": "The new replacement Python code lines."}
+                },
+                "required": ["filename", "start_line", "end_line", "replacement_content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sandbox_write_file",
+            "description": "Completely overwrite an entire file in the sandbox with new content. Automatically triggers sandbox execution to verify returncode.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "The relative filename in the sandbox to write."},
+                    "content": {"type": "string", "description": "The complete Python source code."}
+                },
+                "required": ["filename", "content"]
+            }
+        }
+    }
+]

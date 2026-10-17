@@ -646,6 +646,95 @@ def test_sandbox_read_file_line_range(sandbox):
     assert "def func_5" in md
 
 
+def test_eval_code_headless_gui_smoke_test(sandbox):
+    """Verify that GUI event loops exit cleanly via the headless smoke test hook instead of hanging."""
+    code = (
+        "import time, os, sys\n"
+        "class MockPygame:\n"
+        "    class event:\n"
+        "        _queue = []\n"
+        "        @classmethod\n"
+        "        def get(cls):\n"
+        "            q = list(cls._queue)\n"
+        "            cls._queue.clear()\n"
+        "            return q\n"
+        "        @classmethod\n"
+        "        def post(cls, ev):\n"
+        "            cls._queue.append(ev)\n"
+        "        @classmethod\n"
+        "        def Event(cls, t):\n"
+        "            return type('Event', (), {'type': t})()\n"
+        "    QUIT = 256\n"
+        "    @classmethod\n"
+        "    def get_init(cls):\n"
+        "        return True\n"
+        "    @classmethod\n"
+        "    def quit(cls):\n"
+        "        pass\n"
+        "sys.modules['pygame'] = MockPygame\n"
+        "running = True\n"
+        "frames = 0\n"
+        "while running:\n"
+        "    time.sleep(0.02)\n"
+        "    frames += 1\n"
+        "    for ev in MockPygame.event.get():\n"
+        "        if ev.type == MockPygame.QUIT:\n"
+        "            running = False\n"
+        "print(f'MOCK_GUI_FRAMES={frames}')\n"
+    )
+    res = sandbox.eval_code(code, filename="mock_gui.py", timeout=10)
+    assert res["success"] is True
+    assert res["returncode"] == 0
+    assert "MOCK_GUI_FRAMES=" in res["output"]
+
+
+def test_replace_lines_in_sandbox(sandbox):
+    """Verify that replace_lines swaps exact lines, preserves surrounding content, and auto-evaluates."""
+    initial_code = (
+        "def step_one():\n"
+        "    return 1\n"
+        "\n"
+        "def broken_step():\n"
+        "    return 1 / 0\n"
+        "\n"
+        "def step_three():\n"
+        "    return 3\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    print(step_one() + step_three())\n"
+    )
+    sandbox.write_file("pipeline.py", initial_code)
+
+    # 1. Replace broken_step (lines 4-5) with fixed logic
+    fix_code = "def broken_step():\n    return 2"
+    res = sandbox.replace_lines("pipeline.py", start_line=4, end_line=5, replacement_content=fix_code, auto_eval=True)
+
+    assert res["success"] is True
+    assert res["lines_replaced"] == "4-5"
+    assert "eval_result" in res
+    assert res["eval_result"]["success"] is True
+    assert res["eval_result"]["returncode"] == 0
+    assert "4" in res["eval_result"]["output"]
+
+    # Verify content on disk
+    read_res = sandbox.read_file("pipeline.py", max_chars=None)
+    content = read_res["content"]
+    assert "def step_one():" in content
+    assert "def step_three():" in content
+    assert "return 2" in content
+    assert "return 1 / 0" not in content
+
+    # 2. Test dispatcher
+    md = sandbox.execute("sandbox_replace_lines", {
+        "filename": "pipeline.py",
+        "start_line": 2,
+        "end_line": 2,
+        "replacement_content": "    return 10",
+    })
+    assert "SUCCESS" in md
+    assert "PASSED (Code 0)" in md
+
+
 
 
 

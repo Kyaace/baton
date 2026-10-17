@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -389,12 +390,30 @@ class Orchestrator:
                         content_preview=summary,
                     )
             else:  # Tier.SYSTEM_2
-                try:
-                    summary, art_path, tokens, elapsed = self.system2.synthesize(
-                        task, upstream, progress_callback=_on_progress
+                is_repair = (
+                    task.task_id.startswith("repair_")
+                    or bool(task.tool_params and task.tool_params.get("is_repair"))
+                )
+                if is_repair and hasattr(self.system2, "repair_code") and hasattr(self.system1, "sandbox_tool"):
+                    summary, art_path, tokens, elapsed, success = self.system2.repair_code(
+                        task,
+                        sandbox_tool=self.system1.sandbox_tool,
+                        upstream_dossiers=upstream,
+                        progress_callback=_on_progress,
                     )
-                except TypeError:
-                    summary, art_path, tokens, elapsed = self.system2.synthesize(task, upstream)
+                    if not success:
+                        raise VerificationFailedError(
+                            message="System 2 repair exhausted edit attempts without passing verification.",
+                            artifact_path=art_path,
+                            failure_trace=summary,
+                        )
+                else:
+                    try:
+                        summary, art_path, tokens, elapsed = self.system2.synthesize(
+                            task, upstream, progress_callback=_on_progress
+                        )
+                    except TypeError:
+                        summary, art_path, tokens, elapsed = self.system2.synthesize(task, upstream)
 
                 if art_path:
                     self.db.record_artifact(
@@ -405,8 +424,8 @@ class Orchestrator:
                         file_path=art_path,
                         content_preview=summary,
                     )
-                    # Automatically ensure downstream System 1 verification
-                    if self.auto_verify and (art_path.endswith(".py") or task.task_type == TaskType.DEEP_SYNTHESIS):
+                    # Automatically ensure downstream System 1 verification only for non-repair tasks
+                    if self.auto_verify and not is_repair and (art_path.endswith(".py") or task.task_type == TaskType.DEEP_SYNTHESIS):
                         self._ensure_downstream_verification(task, art_path)
 
             active_prog = self.active_progress.get(task.task_id, prog)
@@ -481,12 +500,13 @@ class Orchestrator:
                 return dt
 
         verify_task_id = f"verify_{task.task_id}"
+        clean_title = re.sub(r"^(?:(?:Repair|Verify):\s*)+", "", task.title).strip()
 
         # 1. Create the FAST_VERIFY task first so it exists in tasks table
         v_task = self.db.create_task(
             task_id=verify_task_id,
             job_id=task.job_id,
-            title=f"Verify: {task.title}",
+            title=f"Verify: {clean_title}",
             tier=Tier.SYSTEM_1,
             task_type=TaskType.FAST_VERIFY,
             prompt_template=f"Verify syntax and execute test suites on '{task.title}' ({artifact_path}).",
@@ -503,26 +523,67 @@ class Orchestrator:
         """
         Escalates a failed verification pass to System 2 by enqueuing a DEEP_SYNTHESIS repair task.
         Rewires downstream dependents to wait on the repair task.
+        Preserves original prompt specifications, prior implementation code, and upstream recon dossiers.
         """
         repair_id = f"repair_{verify_task.task_id}"
+        clean_title = re.sub(r"^(?:(?:Repair|Verify):\s*)+", "", verify_task.title).strip()
 
-        prompt = (
-            f"Automated verification failed and System 1 local repairs were exhausted (Fast-Patch Ladder Tier 2 Escalation).\n\n"
-            f"### Failure Diagnostic Dossier:\n{error.message}\n\n"
-            f"### Condensed Traceback:\n```text\n{error.failure_trace[:2000]}\n```\n\n"
-            f"Rethink the algorithm and regenerate the complete, working implementation."
+        # Resolve original synthesis task to retain its full specification and upstream dependencies
+        orig_task: Optional[Task] = None
+        current_id: Optional[str] = verify_task.depends_on[0] if verify_task.depends_on else None
+        while current_id:
+            parent = self.db.get_task(current_id)
+            if not parent:
+                break
+            orig_task = parent
+            if parent.task_type == TaskType.DEEP_SYNTHESIS and not parent.task_id.startswith("repair_"):
+                break
+            current_id = parent.depends_on[0] if parent.depends_on else None
+
+        prompt_parts = [
+            "Automated verification failed and System 1 local repairs were exhausted (Fast-Patch Ladder Tier 2 Escalation).\n"
+        ]
+
+        if orig_task and orig_task.prompt_template:
+            prompt_parts.append(f"### Original Mission Specifications:\n{orig_task.prompt_template}\n")
+
+        prompt_parts.append(f"### Failure Diagnostic Dossier:\n{error.message}\n")
+
+        if error.failure_trace:
+            prompt_parts.append(f"### Condensed Traceback:\n```text\n{error.failure_trace[:3000]}\n```\n")
+
+        if error.target_code:
+            prompt_parts.append(f"### Prior Implementation Code to Fix:\n```python\n{error.target_code[:12000]}\n```\n")
+
+        prompt_parts.append(
+            "Rethink the algorithm and regenerate the complete, working implementation that satisfies all original specifications and resolves the failure."
         )
+
+        prompt = "\n".join(prompt_parts)
+
+        # Inherit completed upstream reconnaissance dependencies from the original task
+        inherited_deps: list[str] = []
+        if orig_task and orig_task.depends_on:
+            for dep_id in orig_task.depends_on:
+                dep_t = self.db.get_task(dep_id)
+                if dep_t and dep_t.status == TaskStatus.COMPLETED:
+                    inherited_deps.append(dep_id)
+
+        tool_params: dict[str, Any] = {"is_repair": True}
+        if error.artifact_path:
+            tool_params["target_artifact"] = error.artifact_path
 
         # 1. Create the repair task first so it exists in tasks table
         repair_task = self.db.create_task(
             task_id=repair_id,
             job_id=verify_task.job_id,
-            title=f"Repair: {verify_task.title}",
+            title=f"Repair: {clean_title}",
             tier=Tier.SYSTEM_2,
             task_type=TaskType.DEEP_SYNTHESIS,
             prompt_template=prompt,
-            depends_on=[],  # Ready immediately for System 2
+            depends_on=inherited_deps,  # Ready immediately for System 2 with recon context
             priority=verify_task.priority + 2,
+            tool_params=tool_params,
         )
 
         # 2. Rewire any downstream tasks that were waiting on verify_task to now wait on repair_task

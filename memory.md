@@ -85,7 +85,16 @@
   - Briefing dossiers explicitly record resolved typos and recovery metadata.
 
 ### B. System 2 (Deep Nocturnal Synthesizer)
-- **Role:** Deep macro-planning, multi-file software synthesis, and specification proofs. Tool-blind to preserve context.
+- **Role:** Deep macro-planning, multi-file software synthesis, and specification proofs.
+- **Clean Initial Generation:** Initial synthesis requests remain strictly tool-call-less and uncluttered, preserving 100% of context and reasoning budgets for pure architecture, equations, and complete code generation.
+- **JIT Developer Tool Shelf & Deterministic Repair Loop:**
+  - Upon automated verification failure, Orchestrator escalates to System 2 by enqueuing a repair task that retains the complete original mission specifications, failure diagnostic dossier, condensed traceback, prior implementation code, and completed upstream recon dossiers.
+  - Repair mode exposes a focused JIT Developer Shelf:
+    1. `sandbox_read_file(filename, start_line, end_line)`: Inspects targeted windows of lines around the error site (bounded up to 8 calls).
+    2. `sandbox_replace_lines(filename, start_line, end_line, replacement_content)`: Performs surgical line-range replacements leaving all surrounding code untouched (strict budget: max 3 edits).
+    3. `sandbox_write_file(filename, content)`: Overwrites the complete source file if a full rewrite is required.
+  - **Automatic Sandbox Eval on Edit:** Every edit automatically runs `eval_code` in the sandbox under the hood and includes compiler/runtime feedback in the tool response.
+  - **Deterministic Exit:** The instant `eval_result` reports `PASSED (Code 0)`, Orchestrator immediately terminates the repair loop as success and marks the task completed.
 - **Reasoning Monologue Logging:** Emits live SSE tokens. The entire `<think>` reasoning monologue is captured in `baton/artifacts/synthesis/<task_id>_thinking.md`.
 - **Decisive `<think>` Directives:** Prompt instructions mandate concise architectural planning (<1000 tokens) and decisive conclusion (`</think>`) to prevent circular reasoning loops.
 - **Softened Directives:** Prompt directives explicitly omit references to unit tests, testing, and "mathematically rigorous" (retaining "production-grade" and "robust") to prevent synthesis models from over-steering into generating self-contained unit test scaffolding instead of functional implementation logic.
@@ -95,6 +104,8 @@
 
 ### C. Orchestration & Verification Pipeline
 - **Auto-Draining Downstream Verification:** In `start_orchestration`, whenever a System 2 synthesis task completes, the runner immediately checks for queued downstream `FAST_VERIFY` tasks and executes them in the same run, even if `max_steps=1` was passed.
+- **Headless GUI Smoke Test Guard:** Automatically loaded in sandbox executions via `baton/tools/_sandbox_hooks/sitecustomize.py`. Configures headless dummy drivers (`SDL_VIDEODRIVER="dummy"`, `SDL_AUDIODRIVER="dummy"`). Under `BATON_HEADLESS_SMOKE_TEST="1"`, allows Pygame/Tkinter runtimes to initialize, load fonts/assets, and run initial simulation frames for ~1.2s before dispatching `pygame.QUIT`, exiting cleanly with code 0 in ~1.3s rather than blocking for 30s and being killed as false "infinite loops".
+- **Title Prefix Standardization:** Automatically cleans chained compound task titles using regex (`Repair: Verify: ...` -> `Repair: <Clean Title>`).
 - **Local Repair Context Budgeting & HTTP 400 Protection:** System 1 local repair verifies artifact size before attempting single-pass rewriting. Files exceeding 12,000 characters (~3,500 tokens) skip the single-pass rewrite loop (which would overflow Qwen3:14B's 8,192 token limit and trigger HTTP 400 Bad Request) and escalate directly to System 2. `self.generate()` calls in local repair are wrapped with exception guards so API/context errors fail gracefully without crashing the runner.
 - **Primary Failure Pinning & Error Integrity:** In System 1 verification, the original root-cause failure (`initial_failure`) and code (`original_code_str`) are pinned at the start of the dossier findings. Intermediate patch syntax errors (e.g., an unterminated string literal on attempt 1) never overwrite `last_err` or corrupt base code for subsequent attempts. If repairs fail or are exhausted, the sandbox file is restored to `original_code_str`, and `generate_diagnostic_dossier` prioritizes the primary failure over downstream retry errors.
 - **Line-Based Artifact & Sandbox Inspection:** `read_artifact` and `sandbox_read_file` support 1-indexed `start_line` and `end_line` slicing (`slice_text_by_lines`) and emit concise, non-distracting preview metadata (`"preview": "Lines X-Y of Z (A of B chars)"`), eliminating confusion between chat preview truncation and on-disk truncation.
@@ -134,4 +145,4 @@ pytest baton/tests -v
 2. **Orchestration Max Steps:** Do NOT pass `max_steps=1` when running synthesis or pipeline tasks; omit `max_steps` or use `5+` to allow chained tasks and automated downstream verification passes to complete.
 3. **Artifact Files:** Generated dossiers reside in `baton/artifacts/dossiers/`, synthesis code in `baton/artifacts/synthesis/`, and atomic streaming progress snapshots in `baton/artifacts/progress/`.
 4. **Artifact Inspection Rule:** When inspecting artifacts in Chat Copilot or tools, always check the `preview` field (e.g. `Lines 1-78 of 620`) to confirm line boundaries, and pass `start_line` / `end_line` to inspect specific lines or syntax errors without assuming files are truncated on disk.
-5. **Testing Integrity:** All changes to `baton/chat.py`, `baton/system1.py`, `baton/system2.py`, or tools must maintain 100% pass rates across all 186+ pytest tests in `baton/tests/`.
+5. **Testing Integrity:** All changes to `baton/chat.py`, `baton/system1.py`, `baton/system2.py`, or tools must maintain 100% pass rates across all 192+ pytest tests in `baton/tests/`.
