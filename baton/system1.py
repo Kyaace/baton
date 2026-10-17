@@ -830,7 +830,7 @@ class System1Runner:
                                 eval_res = self.sandbox_tool.eval_code(code_str, filename=art_file.name)
                                 if not eval_res.get("success"):
                                     item_error = True
-                                    last_err = eval_res.get("error", "Execution failed")
+                                    last_err = eval_res.get("error") or eval_res.get("output") or "Execution failed"
                                     verification_findings.append(f"### Execution (`{art_file.name}`): FAILED\n{last_err}")
 
                         # System 1 Local Repair Loop if error detected
@@ -884,7 +884,7 @@ class System1Runner:
                                 else:
                                     eval_re = self.sandbox_tool.eval_code(patch_code, filename=art_file.name)
                                     if not eval_re.get("success"):
-                                        last_err = eval_re.get("error", "Execution failed")
+                                        last_err = eval_re.get("error") or eval_re.get("output") or "Execution failed"
                                         code_str = patch_code
                                         target_code_str = patch_code
                                         verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Runtime)\n{last_err}")

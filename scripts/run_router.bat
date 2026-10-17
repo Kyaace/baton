@@ -66,5 +66,7 @@ echo ===========================================================================
 llama-server.exe ^
   --models-preset "%PRESET_FILE%" ^
   --models-max 1 ^
+  --reasoning-budget 1200 ^
+  --reasoning-budget-message "Plan complete. Finish thinking and write your output now." ^
   --host 0.0.0.0 ^
   --port %PORT% !EXTRA_ARGS!

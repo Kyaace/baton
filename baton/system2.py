@@ -741,7 +741,13 @@ class System2Runner:
             filename = f"{task.task_id}.py"
 
         artifact_path = self.artifacts_dir / filename
-        artifact_path.write_text(output_code.strip(), encoding="utf-8")
+        clean_code = output_code.strip()
+        if filename.endswith(".py"):
+            from baton.system1 import extract_code_block
+            extracted = extract_code_block(clean_code)
+            if extracted:
+                clean_code = extracted
+        artifact_path.write_text(clean_code, encoding="utf-8")
 
         # If thinking/reasoning was captured, save companion thinking log
         if reasoning:

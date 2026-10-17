@@ -87,6 +87,17 @@ def test_eval_code_syntax_error_fast_fails(sandbox):
     assert res["success"] is False
     assert res["returncode"] == 1
     assert "SyntaxError" in res["stderr"]
+    assert "SyntaxError" in res["error"]
+
+
+def test_eval_code_runtime_error_populates_error_traceback(sandbox):
+    runtime_err_code = "import nonexistent_module_xyz\n"
+    res = sandbox.eval_code(runtime_err_code)
+    assert res["success"] is False
+    assert res["returncode"] != 0
+    assert res.get("error") is not None
+    assert "ModuleNotFoundError" in res["error"]
+    assert "nonexistent_module_xyz" in res["error"]
 
 
 def test_eval_code_timeout_and_process_termination(sandbox):

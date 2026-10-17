@@ -265,6 +265,7 @@ class SandboxTool:
                 "returncode": 1,
                 "stdout": "",
                 "stderr": check["message"],
+                "error": check["message"],
                 "elapsed_seconds": 0.0,
                 "syntax_error": check,
             }
@@ -272,11 +273,13 @@ class SandboxTool:
         # Stage snippet into sandbox
         write_res = self.write_file(filename, code)
         if not write_res.get("success"):
+            err_msg = f"Failed to stage script: {write_res.get('error')}"
             return {
                 "success": False,
                 "returncode": 1,
                 "stdout": "",
-                "stderr": f"Failed to stage script: {write_res.get('error')}",
+                "stderr": err_msg,
+                "error": err_msg,
                 "elapsed_seconds": 0.0,
             }
 
@@ -289,10 +292,13 @@ class SandboxTool:
             elapsed = time.time() - t0
             raw_output = res.stdout or ""
             is_truncated = len(raw_output) > max_chars
+            has_error = (res.returncode != 0)
+            err_msg = raw_output[:max_chars] if has_error else None
             return {
-                "success": (res.returncode == 0),
+                "success": not has_error,
                 "returncode": res.returncode,
                 "output": raw_output[:max_chars],
+                "error": err_msg,
                 "is_truncated": is_truncated,
                 "total_chars": len(raw_output),
                 "elapsed_seconds": round(elapsed, 3),
@@ -351,6 +357,7 @@ class SandboxTool:
                 "returncode": res.returncode,
                 "metrics": metrics,
                 "output": raw_out[:max_chars],
+                "error": raw_out[:max_chars] if res.returncode != 0 else None,
                 "is_truncated": is_truncated,
                 "total_chars": len(raw_out),
                 "elapsed_seconds": round(elapsed, 3),
@@ -448,7 +455,7 @@ class SandboxTool:
             res = self.eval_code(code, filename=filename, timeout=timeout)
             status_str = "PASSED (Code 0)" if res.get("success") else f"FAILED (Code {res.get('returncode')})"
             trunc_str = f" *(Truncated at {len(res['output'])} of {res['total_chars']} chars)*" if res.get("is_truncated") else ""
-            err_str = f"\n**Error:** {res['error']}" if "error" in res else ""
+            err_str = f"\n**Error:** {res['error']}" if res.get("error") else ""
 
             return (
                 f"### Python Execution: {status_str}\n"
