@@ -114,12 +114,16 @@ def test_check_degenerate_repetition():
     assert check_degenerate_repetition("import numpy as np\ndef foo(x):\n    return x * 2") is False
     assert check_degenerate_repetition("0.0") is False
 
-    # 60 repeated zeros (the exact failure mode observed)
-    infinite_zeros = "MEAN_LONGITUDE_RATE = 0." + ("0" * 65)
+    # Standard PEP-8 79-character comment divider must NOT trigger (regression test for Pong game)
+    pep8_divider = "# " + ("-" * 77) + "\n"
+    assert check_degenerate_repetition(pep8_divider) is False
+
+    # 100 repeated zeros (the exact failure mode observed)
+    infinite_zeros = "MEAN_LONGITUDE_RATE = 0." + ("0" * 105)
     assert check_degenerate_repetition(infinite_zeros) is True
 
     # Repeating period-2 pattern (e.g. 0.0.0.0...)
-    repeating_period2 = "RATE = " + ("0." * 35)
+    repeating_period2 = "RATE = " + ("0." * 55)
     assert check_degenerate_repetition(repeating_period2) is True
 
 
@@ -134,8 +138,8 @@ def test_system2_repetition_breaks_stream(tmp_path: Path):
         b'data: {"choices":[{"delta":{"content":"import numpy as np\\n"}}]}\n\n',
         b'data: {"choices":[{"delta":{"content":"MEAN_LONGITUDE = 0."}}]}\n\n',
     ]
-    # Add 70 individual '0' chunks
-    for _ in range(70):
+    # Add 120 individual '0' chunks to exceed min_chars=100
+    for _ in range(120):
         sse_lines.append(b'data: {"choices":[{"delta":{"content":"0"}}]}\n\n')
     sse_lines.append(b'data: [DONE]\n\n')
 

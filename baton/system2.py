@@ -29,7 +29,7 @@ from baton.models import (
 logger = logging.getLogger("baton.system2")
 
 
-def check_degenerate_repetition(text: str, min_chars: int = 60) -> bool:
+def check_degenerate_repetition(text: str, min_chars: int = 100) -> bool:
     """Detects degenerate token loops (e.g. repeated single characters '0000...' or repeating cycles)."""
     if len(text) < min_chars:
         return False
@@ -353,8 +353,8 @@ class System2Runner:
 
                     # Check for degenerate repetition loops (e.g. infinite 00000... or repeating cycles)
                     if content_chunks:
-                        tail_content = "".join(content_chunks[-30:])
-                        if check_degenerate_repetition(tail_content, min_chars=60):
+                        tail_content = "".join(content_chunks[-120:])
+                        if check_degenerate_repetition(tail_content, min_chars=100):
                             logger.warning(
                                 "Degenerate repetition detected in System 2 content! Breaking stream to preserve valid code."
                             )
@@ -362,8 +362,8 @@ class System2Runner:
                             break
 
                     if reasoning_chunks:
-                        tail_reasoning = "".join(reasoning_chunks[-30:])
-                        if check_degenerate_repetition(tail_reasoning, min_chars=60):
+                        tail_reasoning = "".join(reasoning_chunks[-120:])
+                        if check_degenerate_repetition(tail_reasoning, min_chars=100):
                             logger.warning(
                                 "Degenerate repetition detected in System 2 reasoning! Breaking stream."
                             )

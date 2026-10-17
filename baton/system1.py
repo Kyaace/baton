@@ -812,6 +812,11 @@ class System1Runner:
                         item_error = not syn_info.get("valid", True)
                         last_err = syn_info.get("message", "") if item_error else ""
 
+                        if not item_error and not syn_info.get("has_substance", True):
+                            item_error = True
+                            last_err = syn_info.get("message", "Artifact contains only imports or docstrings with no substantive functions, classes, or logic.")
+                            verification_findings.append(f"### Substance Verification (`{art_file.name}`): FAILED\n{last_err}")
+
                         if not item_error:
                             if "def test_" in code_str or "assert " in code_str:
                                 py_res_dict = self.sandbox_tool.run_pytest(target=art_file.name)
@@ -859,7 +864,14 @@ class System1Runner:
                                     verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Syntax)\n{last_err}")
                                     continue
 
-                                # If syntax passed, test again
+                                if not syn_check.get("has_substance", True):
+                                    last_err = syn_check.get("message", "Patch contains only imports/docstrings without substantive code.")
+                                    code_str = patch_code
+                                    target_code_str = patch_code
+                                    verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Substance)\n{last_err}")
+                                    continue
+
+                                # If syntax and substance passed, test again
                                 if "def test_" in patch_code or "assert " in patch_code:
                                     py_re_dict = self.sandbox_tool.run_pytest(target=art_file.name)
                                     metrics_re = py_re_dict.get("metrics", {})

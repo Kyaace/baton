@@ -355,7 +355,7 @@ BATON_QUEUE_TOOLS_SCHEMA: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_artifact",
-            "description": "Reads the content of an artifact file or previous task result payload.",
+            "description": "Reads the exact on-disk content of an artifact file or previous task result payload. Report stoppage or truncation faithfully without hallucinating or inventing code to fill gaps.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1630,6 +1630,10 @@ Guidelines:
 - When the user requests task creation or project execution, call the appropriate tools immediately.
 - Keep task prompts focused, objective, and unambiguous. Do NOT invent artificial mathematical formulas, extra constraints, or conflicting edge cases unless explicitly requested by the user.
 - For System 2 code synthesis tasks, always specify the target Python filename in tool_params: {"output_artifact": "filename.py"}.
+- When inspecting artifacts via read_artifact or sandbox_read_file:
+  * Faithfully present the exact content returned by the tool.
+  * If the artifact is incomplete, truncated, or halted mid-file on disk, truthfully report the stoppage and current length to the user.
+  * NEVER invent, complete, or hallucinate missing code and claim it exists in the on-disk artifact.
 - The 'core' and 'baton' bundles are active on your toolbelt by default.
 - If you are ever unsure of a tool's parameters or usage, call `tool_help(tool_name=...)`.
 - Keep your conversational answers crisp, clear, and proactive.
@@ -2328,11 +2332,14 @@ class BatonChatSession:
 
                 max_chars = 3500
                 is_truncated = len(text) > max_chars
-                return {
+                res_payload = {
                     "content": text[:max_chars],
                     "is_truncated": is_truncated,
                     "total_chars": len(text),
                 }
+                if not is_truncated:
+                    res_payload["note"] = "Complete on-disk file content (not truncated by tool)."
+                return res_payload
 
             elif name == "queue_status":
                 tasks = self.db.get_all_tasks()

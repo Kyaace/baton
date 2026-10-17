@@ -152,17 +152,32 @@ class SandboxTool:
     def syntax_check(self, code: str) -> dict[str, Any]:
         """
         Validates Python syntax via native AST parsing without executing code.
-        Returns line numbers and error diagnostics if invalid.
+        Returns line numbers and error diagnostics if invalid, and verifies
+        that the code contains substantive statements (not just comments or imports).
         """
         try:
-            ast.parse(code)
+            tree = ast.parse(code)
+            # Identify substantive logic: functions, classes, assignments, control flow, calls
+            substantive_nodes = [
+                node for node in tree.body
+                if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str))
+                and not isinstance(node, (ast.Import, ast.ImportFrom, ast.Pass))
+            ]
+            has_substance = len(substantive_nodes) > 0
+            msg = (
+                "Syntax valid. No parsing errors detected."
+                if has_substance
+                else "Syntax valid, but code contains only imports, comments, or docstrings without substantive functions, classes, or logic."
+            )
             return {
                 "valid": True,
-                "message": "Syntax valid. No parsing errors detected.",
+                "has_substance": has_substance,
+                "message": msg,
             }
         except SyntaxError as e:
             return {
                 "valid": False,
+                "has_substance": False,
                 "error": e.msg,
                 "line": e.lineno,
                 "offset": e.offset,
@@ -172,6 +187,7 @@ class SandboxTool:
         except Exception as e:
             return {
                 "valid": False,
+                "has_substance": False,
                 "error": str(e),
                 "message": f"Parsing error: {e}",
             }

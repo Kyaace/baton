@@ -22,16 +22,25 @@ def sandbox(temp_sandbox_dir):
 
 
 def test_syntax_check_valid_and_invalid(sandbox):
-    # Valid syntax
+    # Valid syntax with substance
     valid_code = "def add(a: int, b: int) -> int:\n    return a + b\n\nresult = add(2, 3)"
     res = sandbox.syntax_check(valid_code)
     assert res["valid"] is True
+    assert res["has_substance"] is True
     assert "Syntax valid" in res["message"]
+
+    # Valid syntax but header/imports only (lacks substance)
+    header_only = '"""Module docstring"""\nimport math\nfrom typing import List\n# -------------------\n'
+    res_header = sandbox.syntax_check(header_only)
+    assert res_header["valid"] is True
+    assert res_header["has_substance"] is False
+    assert "only imports, comments, or docstrings" in res_header["message"]
 
     # Invalid syntax
     invalid_code = "def broken(\n    return 42"
     res_inv = sandbox.syntax_check(invalid_code)
     assert res_inv["valid"] is False
+    assert res_inv["has_substance"] is False
     assert res_inv["line"] is not None
     assert "SyntaxError" in res_inv["message"]
 
@@ -335,6 +344,45 @@ def test_system1_verification_exhausted_raises_error(tmp_path: Path):
 
     assert exc_info.value.artifact_path is not None
     assert "impossible.py" in exc_info.value.target_code or "impossible" in exc_info.value.target_code
+
+
+def test_fast_verify_rejects_header_only_skeleton(tmp_path: Path):
+    """Verify that fast_verify rejects files that only have imports and comments without substantive code."""
+    from unittest.mock import MagicMock
+    from baton.models import Task, TaskType, Tier, VerificationFailedError
+    from baton.system1 import System1Runner
+
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox")
+    runner = System1Runner(artifacts_dir=tmp_path / "dossiers", sandbox_tool=sandbox, max_repair_retries=1)
+
+    # 21-line truncated pong skeleton like the real-world bug
+    skeleton = (
+        '"""Pong game implemented with Pygame."""\n'
+        'from __future__ import annotations\n'
+        'import math\n'
+        'import random\n'
+        '# ----------------------------------------------------------------\n'
+    )
+    synth_file = tmp_path / "pong_skeleton.py"
+    synth_file.write_text(skeleton, encoding="utf-8")
+
+    upstream = [{"task_id": "synth_1", "title": "Synth Pong", "artifact_path": str(synth_file), "result_payload": "Synth done"}]
+    verify_task = Task(
+        task_id="verify_pong",
+        job_id="job_1",
+        title="Verify Pong",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_VERIFY,
+    )
+
+    # Local repair fails to provide substantive code
+    runner.generate = MagicMock(return_value={"response": "```python\n# Still no code\nimport math\n```", "tokens_generated": 10, "elapsed_seconds": 0.1})
+
+    with pytest.raises(VerificationFailedError) as exc_info:
+        runner.execute_task(verify_task, upstream_dossiers=upstream)
+
+    assert "Substance Verification" in str(exc_info.value)
+    assert "pong_skeleton.py" in str(exc_info.value)
 
 
 def test_briefing_dossier_compact_rendering():
