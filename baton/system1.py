@@ -175,24 +175,37 @@ def validate_embedded_code_syntax(text: str) -> tuple[bool, list[str]]:
     return (len(errors) == 0, errors)
 
 
-def generate_diagnostic_dossier(failure_trace: str, code: str = "", max_words: int = 150) -> str:
+def generate_diagnostic_dossier(
+    failure_trace: str,
+    code: str = "",
+    max_words: int = 150,
+    primary_failure: str = "",
+) -> str:
     """
     Deterministically distills an ultra-compact (<= 150 words) failure diagnostic
     focusing purely on root causes, failing assertions, and key error lines.
+    Prioritizes primary failure of the original code over downstream patch retries.
     """
-    if not failure_trace:
+    if not failure_trace and not primary_failure:
         return "No diagnostic trace available."
 
-    lines = failure_trace.strip().splitlines()
-    high_signal = []
-    for line in lines:
-        l_lower = line.lower()
-        if any(k in l_lower for k in ("assertionerror", "syntaxerror", "nameerror", "importerror", "typeerror", "valueerror", "failed", "error:")):
-            high_signal.append(line.strip())
-        elif line.strip().startswith(">") or line.strip().startswith("E "):
-            high_signal.append(line.strip())
+    high_signal: list[str] = []
+    sources = [primary_failure, failure_trace] if primary_failure else [failure_trace]
+    for src in sources:
+        for line in src.strip().splitlines():
+            s_line = line.strip()
+            if not s_line:
+                continue
+            l_lower = s_line.lower()
+            if any(k in l_lower for k in ("assertionerror", "syntaxerror", "nameerror", "importerror", "typeerror", "valueerror", "attributeerror", "failed", "error:")):
+                if s_line not in high_signal:
+                    high_signal.append(s_line)
+            elif s_line.startswith(">") or s_line.startswith("E "):
+                if s_line not in high_signal:
+                    high_signal.append(s_line)
 
     if not high_signal:
+        lines = (primary_failure or failure_trace).strip().splitlines()
         high_signal = [lines[-1].strip()] if lines else ["Execution failed."]
 
     body = "\n".join(high_signal[:8])
@@ -797,6 +810,7 @@ class System1Runner:
                     logger.debug("Recon Recovery parse or dispatch failed: %s", e)
         elif is_verify and upstream_dossiers:
             # Auto-verify upstream python artifacts
+            primary_root_cause = ""
             verification_findings = []
             for u in upstream_dossiers:
                 art_p = u.get("artifact_path")
@@ -804,6 +818,7 @@ class System1Runner:
                     art_file = Path(art_p)
                     if art_file.suffix == ".py":
                         code_str = art_file.read_text(encoding="utf-8", errors="replace")
+                        original_code_str = code_str
                         target_code_str = code_str
                         self.sandbox_tool.write_file(art_file.name, code_str)
                         syn_info = self.sandbox_tool.syntax_check(code_str)
@@ -835,75 +850,107 @@ class System1Runner:
 
                         # System 1 Local Repair Loop if error detected
                         if item_error:
-                            logger.info("System 1 entering local repair loop for '%s'...", art_file.name)
-                            for retry in range(1, self.max_repair_retries + 1):
-                                comp_trace = compress_traceback(last_err)
-                                repair_prompt = (
-                                    f"The Python file `{art_file.name}` failed automated verification.\n\n"
-                                    f"### Error Diagnostics & Traceback:\n```text\n{comp_trace}\n```\n\n"
-                                    f"### Failing Code:\n```python\n{code_str}\n```\n\n"
-                                    "Fix the syntax error, missing import, or assertion failure.\n"
-                                    "Return ONLY the complete, corrected Python code inside a ```python ``` block."
+                            primary_failure = last_err
+                            primary_root_cause = primary_failure
+                            if len(code_str) > 12000:
+                                logger.info(
+                                    "Artifact '%s' size (%d chars) exceeds System 1 local repair budget (12000 chars). Escalating directly to System 2.",
+                                    art_file.name,
+                                    len(code_str),
                                 )
-                                repair_sys_prompt = (
-                                    "You are Baton System 1: Fast Code Repair Specialist.\n"
-                                    "Fix the error and emit clean, working Python. Zero conversational filler."
-                                )
-                                patch_res = self.generate(repair_prompt, system_prompt=repair_sys_prompt)
-                                patch_code = extract_code_block(patch_res.get("response", ""))
-                                if not patch_code or patch_code == code_str:
-                                    continue
-
-                                # Stage patched code in sandbox
-                                self.sandbox_tool.write_file(art_file.name, patch_code)
-                                syn_check = self.sandbox_tool.syntax_check(patch_code)
-                                if not syn_check.get("valid", True):
-                                    last_err = syn_check.get("message", "Syntax error")
-                                    code_str = patch_code
-                                    target_code_str = patch_code
-                                    verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Syntax)\n{last_err}")
-                                    continue
-
-                                if not syn_check.get("has_substance", True):
-                                    last_err = syn_check.get("message", "Patch contains only imports/docstrings without substantive code.")
-                                    code_str = patch_code
-                                    target_code_str = patch_code
-                                    verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Substance)\n{last_err}")
-                                    continue
-
-                                # If syntax and substance passed, test again
-                                if "def test_" in patch_code or "assert " in patch_code:
-                                    py_re_dict = self.sandbox_tool.run_pytest(target=art_file.name)
-                                    metrics_re = py_re_dict.get("metrics", {})
-                                    if not py_re_dict.get("success", False) or metrics_re.get("failed", 0) > 0 or metrics_re.get("errors", 0) > 0:
-                                        last_err = py_re_dict.get("output", "") or "Tests failed"
-                                        code_str = patch_code
-                                        target_code_str = patch_code
-                                        verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Tests)\n{last_err[:300]}")
-                                        continue
-                                else:
-                                    eval_re = self.sandbox_tool.eval_code(patch_code, filename=art_file.name)
-                                    if not eval_re.get("success"):
-                                        last_err = eval_re.get("error") or eval_re.get("output") or "Execution failed"
-                                        code_str = patch_code
-                                        target_code_str = patch_code
-                                        verification_findings.append(f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Runtime)\n{last_err}")
-                                        continue
-
-                                # Patch SUCCEEDED!
-                                code_str = patch_code
-                                target_code_str = patch_code
-                                item_error = False
-                                art_file.write_text(patch_code, encoding="utf-8")
                                 verification_findings.append(
-                                    f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): SUCCESS\n"
-                                    f"System 1 successfully resolved all errors in `{art_file.name}` and updated artifact on disk."
+                                    f"### Local Repair Skipped: `{art_file.name}` length ({len(code_str)} chars) exceeds System 1 single-pass rewrite budget (12000 chars). Escalating directly to System 2."
                                 )
-                                logger.info("System 1 successfully patched '%s' on attempt %d.", art_file.name, retry)
-                                break
+                            else:
+                                logger.info("System 1 entering local repair loop for '%s'...", art_file.name)
+                                current_repair_code = code_str
+                                for retry in range(1, self.max_repair_retries + 1):
+                                    comp_trace = compress_traceback(last_err)
+                                    budgeted_code = current_repair_code[:12000]
+                                    repair_prompt = (
+                                        f"The Python file `{art_file.name}` failed automated verification.\n\n"
+                                        f"### Error Diagnostics & Traceback:\n```text\n{comp_trace}\n```\n\n"
+                                        f"### Failing Code:\n```python\n{budgeted_code}\n```\n\n"
+                                        "Fix the syntax error, missing import, or assertion failure.\n"
+                                        "Return ONLY the complete, corrected Python code inside a ```python ``` block."
+                                    )
+                                    repair_sys_prompt = (
+                                        "You are Baton System 1: Fast Code Repair Specialist.\n"
+                                        "Fix the error and emit clean, working Python. Zero conversational filler."
+                                    )
+                                    try:
+                                        patch_res = self.generate(repair_prompt, system_prompt=repair_sys_prompt)
+                                    except Exception as gen_err:
+                                        logger.warning("System 1 local repair generation failed for '%s': %s", art_file.name, gen_err)
+                                        verification_findings.append(
+                                            f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Generation error)\n{gen_err}"
+                                        )
+                                        break
 
-                        if item_error:
-                            has_verification_error = True
+                                    patch_code = extract_code_block(patch_res.get("response", ""))
+                                    if not patch_code or patch_code == current_repair_code:
+                                        continue
+
+                                    # Stage patched code in sandbox
+                                    self.sandbox_tool.write_file(art_file.name, patch_code)
+                                    syn_check = self.sandbox_tool.syntax_check(patch_code)
+                                    if not syn_check.get("valid", True):
+                                        patch_err = syn_check.get("message", "Syntax error")
+                                        verification_findings.append(
+                                            f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Syntax)\n{patch_err}"
+                                        )
+                                        continue
+
+                                    if not syn_check.get("has_substance", True):
+                                        patch_err = syn_check.get("message", "Patch contains only imports/docstrings without substantive code.")
+                                        verification_findings.append(
+                                            f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Substance)\n{patch_err}"
+                                        )
+                                        continue
+
+                                    # If syntax and substance passed, test again
+                                    if "def test_" in patch_code or "assert " in patch_code:
+                                        py_re_dict = self.sandbox_tool.run_pytest(target=art_file.name)
+                                        metrics_re = py_re_dict.get("metrics", {})
+                                        if not py_re_dict.get("success", False) or metrics_re.get("failed", 0) > 0 or metrics_re.get("errors", 0) > 0:
+                                            patch_err = py_re_dict.get("output", "") or "Tests failed"
+                                            current_repair_code = patch_code
+                                            last_err = patch_err
+                                            verification_findings.append(
+                                                f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Tests)\n{patch_err[:300]}"
+                                            )
+                                            continue
+                                    else:
+                                        eval_re = self.sandbox_tool.eval_code(patch_code, filename=art_file.name)
+                                        if not eval_re.get("success"):
+                                            patch_err = eval_re.get("error") or eval_re.get("output") or "Execution failed"
+                                            current_repair_code = patch_code
+                                            last_err = patch_err
+                                            verification_findings.append(
+                                                f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): FAILED (Runtime)\n{patch_err}"
+                                            )
+                                            continue
+
+                                    # Patch SUCCEEDED!
+                                    code_str = patch_code
+                                    target_code_str = patch_code
+                                    item_error = False
+                                    art_file.write_text(patch_code, encoding="utf-8")
+                                    verification_findings.append(
+                                        f"### Local Patch (Attempt {retry}/{self.max_repair_retries}): SUCCESS\n"
+                                        f"System 1 successfully resolved all errors in `{art_file.name}` and updated artifact on disk."
+                                    )
+                                    logger.info("System 1 successfully patched '%s' on attempt %d.", art_file.name, retry)
+                                    break
+
+                            if item_error:
+                                has_verification_error = True
+                                target_code_str = original_code_str
+                                self.sandbox_tool.write_file(art_file.name, original_code_str)
+                                verification_findings.insert(
+                                    0,
+                                    f"### Primary Failure Root Cause (Initial Code):\n{primary_failure}"
+                                )
 
             if verification_findings:
                 raw_tool_data = "\n\n".join(verification_findings)
@@ -975,7 +1022,9 @@ class System1Runner:
         if upstream_dossiers:
             user_prompt_parts.append("## Prior Upstream Context:")
             for d in upstream_dossiers:
-                user_prompt_parts.append(f"- **{d['title']}**: {d['result_payload'][:300]}")
+                title_str = d.get("title", "Dossier")
+                payload_str = d.get("result_payload", "")[:300]
+                user_prompt_parts.append(f"- **{title_str}**: {payload_str}")
 
         action_phrase = (
             "\nSynthesize the above verification results into a structured verification dossier now:"
@@ -1055,7 +1104,12 @@ class System1Runner:
 
         if is_verify and has_verification_error:
             logger.warning("Verification failed and local repairs exhausted for '%s'.", task.task_id)
-            diag = generate_diagnostic_dossier(raw_tool_data, target_code_str, max_words=150)
+            diag = generate_diagnostic_dossier(
+                raw_tool_data,
+                target_code_str,
+                max_words=150,
+                primary_failure=primary_root_cause,
+            )
             raise VerificationFailedError(
                 message=f"{summary_snippet}\n\n{diag}",
                 artifact_path=str(artifact_path),

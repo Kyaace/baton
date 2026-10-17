@@ -896,6 +896,50 @@ def test_read_artifact_empty_file_warning(chat_session: BatonChatSession, tmp_pa
     assert "0 bytes (empty output)" in res["content"]
 
 
+def test_read_artifact_line_range_and_preview(chat_session: BatonChatSession, tmp_path):
+    """Verify that read_artifact supports start_line, end_line, and returns concise preview metadata."""
+    artifact_file = tmp_path / "calc_artifact.py"
+    lines = [f"# Line {i}: x = {i * 10}" for i in range(1, 31)]
+    full_text = "\n".join(lines) + "\n"
+    artifact_file.write_text(full_text, encoding="utf-8")
+
+    task = chat_session.db.create_task(
+        task_id="task_calc",
+        title="Calculator Synthesis",
+        tier=Tier.SYSTEM_2,
+    )
+    chat_session.db.mark_task_completed(
+        task_id="task_calc",
+        result_payload="Complete calculator code",
+        artifact_path=str(artifact_file),
+    )
+
+    # 1. Slice specific lines
+    res = chat_session.execute_tool(
+        "read_artifact",
+        {"task_id": "task_calc", "start_line": 10, "end_line": 15},
+    )
+    assert res["start_line"] == 10
+    assert res["end_line"] == 15
+    assert res["total_lines"] == 30
+    assert res["is_truncated"] is True
+    assert "note" not in res
+    assert res["preview"] == f"Lines 10-15 of 30 ({len(res['content'])} of {len(full_text)} chars)"
+    assert "# Line 10: x = 100" in res["content"]
+    assert "# Line 15: x = 150" in res["content"]
+    assert "# Line 16: x = 160" not in res["content"]
+
+    # 2. Direct file_path reading
+    res_path = chat_session.execute_tool(
+        "read_artifact",
+        {"file_path": str(artifact_file), "start_line": 1, "end_line": 5},
+    )
+    assert res_path["start_line"] == 1
+    assert res_path["end_line"] == 5
+    assert "# Line 1: x = 10" in res_path["content"]
+
+
+
 
 
 

@@ -19,7 +19,8 @@
   - **Decisive Reasoning Protocol:** Enforces focused `<think>` planning (<1000 tokens) and decisive conclusion to avoid circular reasoning loops.
   - **Reasoning Code Salvage Fallback:** Parses and salvages drafted code blocks directly from reasoning monologues if token ceilings are reached before closing `</think>`.
   - **Streaming Monologue Capture:** Captures the full reasoning monologue atomically to `baton/artifacts/synthesis/<task_id>_thinking.md`.
-- **Automated Verification Pipeline:** `start_orchestration` automatically executes downstream verification tasks (`fast_verify`) immediately following synthesis, ensuring code is verified without leaving verification abandoned.
+- **Automated Verification Pipeline:** `start_orchestration` automatically executes downstream verification tasks (`fast_verify`) immediately following synthesis. Features single-pass rewrite context budgeting and exception guards to prevent HTTP 400 crashes on large files, and pins the initial root-cause failure so intermediate retry errors cannot mask bugs.
+- **Line-Based Artifact Inspection:** `read_artifact` and `sandbox_read_file` support 1-indexed `start_line` and `end_line` slicing with concise preview metadata (`Lines X-Y of Z`), preventing confusion between chat preview capping and on-disk truncation.
 - **Multi-Model Router Mode (llama-server :8080):** Serves both System 1 (`qwen3:14b`) and System 2 (`ornith-1.5-35b-a3b`) from a single `llama-server` process on port 8080 using `models_preset.ini`. Configured with `parallel=1`, `cache-type-k=q8_0`, and `cache-type-v=q8_0` to fit strictly within the 12GB VRAM envelope of an RTX 3060. Models dynamically page in/out of VRAM on demand (~1.1s eviction time).
 - **Environment & Technical Reference:** See [`memory.md`](file:///e:/dev/Antigravity/baton/memory.md) for full hardware profiling, VRAM budget specifications, and operational guardrails.
 

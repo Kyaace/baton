@@ -85,15 +85,19 @@
   - Briefing dossiers explicitly record resolved typos and recovery metadata.
 
 ### B. System 2 (Deep Nocturnal Synthesizer)
-- **Role:** Deep mathematical derivation, multi-file software synthesis, and specification proofs. Tool-blind to preserve context.
+- **Role:** Deep macro-planning, multi-file software synthesis, and specification proofs. Tool-blind to preserve context.
 - **Reasoning Monologue Logging:** Emits live SSE tokens. The entire `<think>` reasoning monologue is captured in `baton/artifacts/synthesis/<task_id>_thinking.md`.
 - **Decisive `<think>` Directives:** Prompt instructions mandate concise architectural planning (<1000 tokens) and decisive conclusion (`</think>`) to prevent circular reasoning loops.
+- **Softened Directives:** Prompt directives explicitly omit references to unit tests, testing, and "mathematically rigorous" (retaining "production-grade" and "robust") to prevent synthesis models from over-steering into generating self-contained unit test scaffolding instead of functional implementation logic.
 - **Reasoning Code Salvage Fallback:** If the model hits token ceilings while generating inside reasoning without closing `</think>`, `System2Runner` parses and salvages Python code blocks directly from the reasoning monologue rather than generating an empty artifact.
 - **Continuation Prompt Recovery:** If `output_code` is empty at token limit, the continuation request explicitly prompts the model to conclude thinking with `</think>` and emit the code.
 - **Resilient File Naming:** Automatically names output artifacts `<task_id>.py` when code patterns or keywords are present.
 
 ### C. Orchestration & Verification Pipeline
 - **Auto-Draining Downstream Verification:** In `start_orchestration`, whenever a System 2 synthesis task completes, the runner immediately checks for queued downstream `FAST_VERIFY` tasks and executes them in the same run, even if `max_steps=1` was passed.
+- **Local Repair Context Budgeting & HTTP 400 Protection:** System 1 local repair verifies artifact size before attempting single-pass rewriting. Files exceeding 12,000 characters (~3,500 tokens) skip the single-pass rewrite loop (which would overflow Qwen3:14B's 8,192 token limit and trigger HTTP 400 Bad Request) and escalate directly to System 2. `self.generate()` calls in local repair are wrapped with exception guards so API/context errors fail gracefully without crashing the runner.
+- **Primary Failure Pinning & Error Integrity:** In System 1 verification, the original root-cause failure (`initial_failure`) and code (`original_code_str`) are pinned at the start of the dossier findings. Intermediate patch syntax errors (e.g., an unterminated string literal on attempt 1) never overwrite `last_err` or corrupt base code for subsequent attempts. If repairs fail or are exhausted, the sandbox file is restored to `original_code_str`, and `generate_diagnostic_dossier` prioritizes the primary failure over downstream retry errors.
+- **Line-Based Artifact & Sandbox Inspection:** `read_artifact` and `sandbox_read_file` support 1-indexed `start_line` and `end_line` slicing (`slice_text_by_lines`) and emit concise, non-distracting preview metadata (`"preview": "Lines X-Y of Z (A of B chars)"`), eliminating confusion between chat preview truncation and on-disk truncation.
 - **Empty File Protection:** `read_artifact` detects 0-byte output files and alerts the user/agent, linking directly to `_thinking.md`.
 
 ---
@@ -129,4 +133,5 @@ pytest baton/tests -v
 1. **VRAM Concurrency Rule:** Never increase `parallel` beyond `1` in `models_preset.ini`. Dual 32k contexts will exhaust the 12GB RTX 3060 and spill into Windows Shared GPU Memory over PCIe, causing a 25x-50x speed collapse.
 2. **Orchestration Max Steps:** Do NOT pass `max_steps=1` when running synthesis or pipeline tasks; omit `max_steps` or use `5+` to allow chained tasks and automated downstream verification passes to complete.
 3. **Artifact Files:** Generated dossiers reside in `baton/artifacts/dossiers/`, synthesis code in `baton/artifacts/synthesis/`, and atomic streaming progress snapshots in `baton/artifacts/progress/`.
-4. **Testing Integrity:** All changes to `baton/chat.py`, `baton/system1.py`, `baton/system2.py`, or tools must maintain 100% pass rates across all 179+ pytest tests in `baton/tests/`.
+4. **Artifact Inspection Rule:** When inspecting artifacts in Chat Copilot or tools, always check the `preview` field (e.g. `Lines 1-78 of 620`) to confirm line boundaries, and pass `start_line` / `end_line` to inspect specific lines or syntax errors without assuming files are truncated on disk.
+5. **Testing Integrity:** All changes to `baton/chat.py`, `baton/system1.py`, `baton/system2.py`, or tools must maintain 100% pass rates across all 186+ pytest tests in `baton/tests/`.

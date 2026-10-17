@@ -103,13 +103,13 @@ def sanitize_continuation_seam(prior: str, new_chunk: str, max_overlap: int = 80
 
 STATIC_SYNTHESIS_SYSTEM_PROMPT = (
     "You are Baton System 2: Deep Synthesizer & Principal Engineer.\n"
-    "You write complete, production-grade, mathematically rigorous implementations and specifications.\n"
+    "You write complete, production-grade implementations and specifications.\n"
     "Reasoning & Execution Directives:\n"
     "- Think decisively: plan the essential architecture, formulas, and edge cases concisely in <think>.\n"
     "- Do not deliberate indefinitely or loop over minor stylistic conventions.\n"
     "- Once decided, immediately emit </think> and output the complete production code wrapped in ```python ... ```.\n"
     "- Include zero placeholders, ellipses (...), or pseudo-code.\n"
-    "- Every function, formula, and class must be fully written and tested."
+    "- Every function, formula, and class must be fully written and functional."
 )
 
 
@@ -563,7 +563,7 @@ class System2Runner:
             "\nReasoning & Output Protocol:\n"
             "1. Plan your solution concisely in <think>. Keep reasoning focused on essential architecture and equations (under 500-1000 tokens).\n"
             "2. Conclude reasoning, close the thinking block (</think>), and write the code.\n"
-            "3. Enclose all production code inside a standard markdown code block (```python ... ```) with self-contained unit tests.\n\n"
+            "3. Enclose all production code inside a standard markdown code block (```python ... ```).\n\n"
             "Generate the complete, robust implementation now:"
         )
 

@@ -37,7 +37,7 @@ from baton.models import Task, TaskStatus, TaskType, Tier
 from baton.orchestrator import Orchestrator
 from baton.tools.docs_tool import DocsTool
 from baton.tools.newsboat import NewsboatTool
-from baton.tools.sandbox import SandboxTool
+from baton.tools.sandbox import SandboxTool, slice_text_by_lines
 from baton.tools.sdr import SdrTool
 from baton.tools.time_tool import TimeTool
 from baton.tools.vault import VaultTool
@@ -355,7 +355,7 @@ BATON_QUEUE_TOOLS_SCHEMA: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_artifact",
-            "description": "Reads the exact on-disk content of an artifact file or previous task result payload. Report stoppage or truncation faithfully without hallucinating or inventing code to fill gaps.",
+            "description": "Reads on-disk content of an artifact file or previous task result payload by line range or character budget.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -366,6 +366,18 @@ BATON_QUEUE_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     "file_path": {
                         "type": "string",
                         "description": "Direct file path to read (alternative to task_id).",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "1-indexed starting line number to read (inclusive).",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "1-indexed ending line number to read (inclusive).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to preview (default: 3500).",
                     },
                 },
             },
@@ -679,13 +691,21 @@ SANDBOX_TOOLS_SCHEMA: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "sandbox_read_file",
-            "description": "Reads a file from the isolated sandbox directory.",
+            "description": "Reads a file from the isolated sandbox directory with optional line range slicing.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "filename": {
                         "type": "string",
                         "description": "Relative filename within the sandbox.",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "1-indexed starting line number to read (inclusive).",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "1-indexed ending line number to read (inclusive).",
                     },
                     "max_chars": {
                         "type": "integer",
@@ -1631,9 +1651,9 @@ Guidelines:
 - Keep task prompts focused, objective, and unambiguous. Do NOT invent artificial mathematical formulas, extra constraints, or conflicting edge cases unless explicitly requested by the user.
 - For System 2 code synthesis tasks, always specify the target Python filename in tool_params: {"output_artifact": "filename.py"}.
 - When inspecting artifacts via read_artifact or sandbox_read_file:
-  * Faithfully present the exact content returned by the tool.
-  * If the artifact is incomplete, truncated, or halted mid-file on disk, truthfully report the stoppage and current length to the user.
-  * NEVER invent, complete, or hallucinate missing code and claim it exists in the on-disk artifact.
+  * Check the `preview` metadata (e.g. "Lines 1-78 of 620 (3450 of 30686 chars)") to understand which line range is currently previewed.
+  * To inspect specific sections or investigate errors around particular lines, pass `start_line` and `end_line`.
+  * Faithfully present the exact content returned by the tool without inventing or hallucinating missing code.
 - The 'core' and 'baton' bundles are active on your toolbelt by default.
 - If you are ever unsure of a tool's parameters or usage, call `tool_help(tool_name=...)`.
 - Keep your conversational answers crisp, clear, and proactive.
@@ -2323,23 +2343,35 @@ class BatonChatSession:
                             thinking_msg = f" However, reasoning monologue was recorded in '{th_path}'."
                     return {
                         "content": f"Artifact file '{task.artifact_path if task else file_path}' exists but contains 0 bytes (empty output).{thinking_msg}",
-                        "is_truncated": False,
+                        "preview": "0 lines (0 chars)",
+                        "start_line": 0,
+                        "end_line": 0,
+                        "total_lines": 0,
                         "total_chars": 0,
+                        "is_truncated": False,
                     }
 
                 if not text:
                     return {"error": f"No artifact text found for task_id={task_id} / file_path={file_path}"}
 
-                max_chars = 3500
-                is_truncated = len(text) > max_chars
-                res_payload = {
-                    "content": text[:max_chars],
-                    "is_truncated": is_truncated,
-                    "total_chars": len(text),
+                start_line = args.get("start_line")
+                end_line = args.get("end_line")
+                max_chars = args.get("max_chars", 3500)
+                sliced = slice_text_by_lines(
+                    text,
+                    start_line=start_line,
+                    end_line=end_line,
+                    max_chars=max_chars,
+                )
+                return {
+                    "preview": sliced["preview"],
+                    "content": sliced["content"],
+                    "start_line": sliced["start_line"],
+                    "end_line": sliced["end_line"],
+                    "total_lines": sliced["total_lines"],
+                    "total_chars": sliced["total_chars"],
+                    "is_truncated": sliced["is_truncated"],
                 }
-                if not is_truncated:
-                    res_payload["note"] = "Complete on-disk file content (not truncated by tool)."
-                return res_payload
 
             elif name == "queue_status":
                 tasks = self.db.get_all_tasks()
@@ -2595,7 +2627,10 @@ class BatonChatSession:
                 if not self.sandbox_tool:
                     return {"error": "SandboxTool is not available."}
                 return self.sandbox_tool.read_file(
-                    args["filename"], max_chars=args.get("max_chars", 3500)
+                    args["filename"],
+                    start_line=args.get("start_line"),
+                    end_line=args.get("end_line"),
+                    max_chars=args.get("max_chars", 3500),
                 )
 
             elif name == "sandbox_list_files":

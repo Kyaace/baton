@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -28,6 +28,7 @@ from baton.system1 import (
     validate_embedded_code_syntax,
 )
 from baton.system2 import System2Runner
+from baton.tools.sandbox import SandboxTool
 
 
 # =============================================================================
@@ -301,3 +302,96 @@ def test_orchestrator_tier2_escalation_enqueues_system2(tmp_path: Path):
     assert repair_task.task_type == TaskType.DEEP_SYNTHESIS
     assert "Fast-Patch Ladder Tier 2 Escalation" in repair_task.prompt_template
     assert "AssertionError: assert 8.2 == 7.8" in repair_task.prompt_template
+
+
+def test_generate_diagnostic_dossier_prioritizes_primary_failure():
+    """Verify that generate_diagnostic_dossier prioritizes the original failure over downstream retry errors."""
+    primary_err = "AttributeError: 'Paddle' object has no attribute 'top'\n  File 'breakout.py', line 210, in update"
+    retry_trace = (
+        "### Syntax Verification (`breakout.py`):\nPASSED\n\n"
+        "### Execution (`breakout.py`): FAILED\nAttributeError: 'Paddle' object has no attribute 'top'\n\n"
+        "### Local Patch (Attempt 1/3): FAILED (Syntax)\nSyntaxError: unterminated string literal on line 435\n\n"
+        "### Local Patch (Attempt 2/3): FAILED (Syntax)\nSyntaxError: invalid syntax on line 440"
+    )
+
+    diag = generate_diagnostic_dossier(retry_trace, primary_failure=primary_err, max_words=150)
+    assert "Root Cause Analysis" in diag
+    assert "AttributeError: 'Paddle' object has no attribute 'top'" in diag
+
+
+def test_system1_local_repair_skips_oversized_files(tmp_path: Path):
+    """Verify that files over 12,000 characters skip System 1 single-pass rewrite to prevent HTTP 400 crashes."""
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox")
+    runner = System1Runner(artifacts_dir=tmp_path / "dossiers", sandbox_tool=sandbox)
+
+    # Create 15,000 character python file with deliberate runtime failure
+    large_code = "# Large file\n" + ("x = 1\n" * 2000) + "raise ValueError('Initial deliberate bug')\n"
+    art_file = tmp_path / "large_game.py"
+    art_file.write_text(large_code, encoding="utf-8")
+
+    verify_task = Task(
+        task_id="verify_large",
+        job_id="job_test",
+        title="Verify Large Game",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_VERIFY,
+    )
+    upstream = [{"artifact_path": str(art_file), "title": "Large Game"}]
+
+    with patch.object(runner, "generate") as mock_gen:
+        mock_gen.return_value = {
+            "response": '{"verdict": "FAILED", "key_findings": ["ValueError: Initial deliberate bug"], "remediation_points": ["Fix bug"]}',
+            "tokens_generated": 50,
+        }
+        with pytest.raises(VerificationFailedError) as exc_info:
+            runner.execute_task(verify_task, upstream_dossiers=upstream)
+
+        # Ensure local repair prompt was NOT generated (only dossier distillation was called)
+        assert mock_gen.call_count == 1
+        err = exc_info.value
+        assert "Initial deliberate bug" in err.message or "Initial deliberate bug" in err.failure_trace
+        assert err.target_code == large_code
+
+
+def test_system1_local_repair_handles_http_400_cleanly(tmp_path: Path):
+    """Verify that HTTP 400 or network exceptions in local repair do not crash the runner and preserve primary failure."""
+    import requests
+    sandbox = SandboxTool(sandbox_dir=tmp_path / "sandbox")
+    runner = System1Runner(artifacts_dir=tmp_path / "dossiers", sandbox_tool=sandbox)
+
+    failing_code = "raise RuntimeError('Original primary failure')\n"
+    art_file = tmp_path / "small_test.py"
+    art_file.write_text(failing_code, encoding="utf-8")
+
+    verify_task = Task(
+        task_id="verify_small",
+        job_id="job_test",
+        title="Verify Small",
+        tier=Tier.SYSTEM_1,
+        task_type=TaskType.FAST_VERIFY,
+    )
+    upstream = [{"artifact_path": str(art_file), "title": "Small"}]
+
+    call_count = 0
+    def mock_gen_with_400(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call is local repair generation: simulate HTTP 400 Bad Request
+            resp = requests.Response()
+            resp.status_code = 400
+            raise requests.exceptions.HTTPError("400 Client Error: Bad Request", response=resp)
+        # Second call is dossier distillation
+        return {
+            "response": '{"verdict": "FAILED", "key_findings": ["RuntimeError: Original primary failure"], "remediation_points": ["Fix"]}',
+            "tokens_generated": 50,
+        }
+
+    with patch.object(runner, "generate", side_effect=mock_gen_with_400):
+        with pytest.raises(VerificationFailedError) as exc_info:
+            runner.execute_task(verify_task, upstream_dossiers=upstream)
+
+        err = exc_info.value
+        assert "Original primary failure" in err.message or "Original primary failure" in err.failure_trace
+        assert err.target_code == failing_code
+

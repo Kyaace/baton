@@ -588,5 +588,64 @@ def test_system1_recon_autonomous_recovery_on_typo_or_miss(tmp_path: Path):
         assert "delta = 23.45 * sin" in content
 
 
+def test_slice_text_by_lines_utilities():
+    from baton.tools.sandbox import slice_text_by_lines
+
+    # 1. Empty text
+    empty_res = slice_text_by_lines("")
+    assert empty_res["content"] == ""
+    assert empty_res["is_truncated"] is False
+    assert empty_res["total_lines"] == 0
+
+    # 2. Multi-line slice
+    text = "line1\nline2\nline3\nline4\nline5\n"
+    res = slice_text_by_lines(text, start_line=2, end_line=4)
+    assert res["content"] == "line2\nline3\nline4\n"
+    assert res["start_line"] == 2
+    assert res["end_line"] == 4
+    assert res["total_lines"] == 5
+    assert res["is_truncated"] is True
+    assert res["preview"] == f"Lines 2-4 of 5 ({len(res['content'])} of {len(text)} chars)"
+
+    # 3. Single line result
+    single_res = slice_text_by_lines(text, start_line=3, end_line=3)
+    assert single_res["content"] == "line3\n"
+    assert single_res["start_line"] == 3
+    assert single_res["end_line"] == 3
+    assert single_res["preview"] == f"Line 3 of 5 ({len(single_res['content'])} of {len(text)} chars)"
+
+    # 4. Out of bounds start_line
+    oob_res = slice_text_by_lines(text, start_line=10, end_line=20)
+    assert oob_res["content"] == ""
+    assert oob_res["is_truncated"] is True
+
+    # 5. Char budget capping
+    capped_res = slice_text_by_lines(text, max_chars=12)
+    assert capped_res["is_truncated"] is True
+    assert len(capped_res["content"]) <= 12
+
+
+def test_sandbox_read_file_line_range(sandbox):
+    content = "\n".join([f"def func_{i}(): return {i}" for i in range(1, 21)])
+    sandbox.write_file("funcs.py", content)
+
+    # Read specific line range
+    res = sandbox.read_file("funcs.py", start_line=5, end_line=8)
+    assert res["success"] is True
+    assert res["start_line"] == 5
+    assert res["end_line"] == 8
+    assert res["total_lines"] == 20
+    assert "def func_5(): return 5" in res["content"]
+    assert "def func_8(): return 8" in res["content"]
+    assert "def func_9" not in res["content"]
+    assert res["preview"] == f"Lines 5-8 of 20 ({len(res['content'])} of {len(content)} chars)"
+
+    # Execute dispatcher
+    md = sandbox.execute("sandbox_read_file", {"filename": "funcs.py", "start_line": 5, "end_line": 8})
+    assert "### Sandbox File: `funcs.py` (Lines 5-8 of 20" in md
+    assert "def func_5" in md
+
+
+
 
 

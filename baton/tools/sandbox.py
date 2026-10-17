@@ -98,6 +98,89 @@ def windows_safe_run(
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout=stdout)
 
 
+def slice_text_by_lines(
+    text: str,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    max_chars: Optional[int] = 3500,
+) -> dict[str, Any]:
+    """
+    Slices text by 1-indexed line numbers and/or max characters budget.
+    Returns preview metadata and the sliced content without wordy conversational distractors.
+    """
+    if not text:
+        return {
+            "content": "",
+            "preview": "0 lines (0 chars)",
+            "start_line": 0,
+            "end_line": 0,
+            "total_lines": 0,
+            "total_chars": 0,
+            "is_truncated": False,
+        }
+
+    lines = text.splitlines(keepends=True)
+    total_lines = len(lines)
+    total_chars = len(text)
+
+    req_start = max(1, int(start_line)) if start_line is not None else 1
+    req_end = min(total_lines, max(req_start, int(end_line))) if end_line is not None else total_lines
+
+    if req_start > total_lines:
+        return {
+            "content": "",
+            "preview": f"Lines {req_start}-{req_end} of {total_lines} (0 of {total_chars} chars)",
+            "start_line": req_start,
+            "end_line": req_end,
+            "total_lines": total_lines,
+            "total_chars": total_chars,
+            "is_truncated": True,
+        }
+
+    sub_lines = lines[req_start - 1 : req_end]
+    char_limit = max_chars if (max_chars is not None and max_chars > 0) else float("inf")
+
+    acc_chars = 0
+    included_count = 0
+    for line in sub_lines:
+        if acc_chars + len(line) > char_limit and included_count > 0:
+            break
+        acc_chars += len(line)
+        included_count += 1
+
+    if included_count == 0 and sub_lines:
+        content = sub_lines[0][: int(char_limit)]
+        actual_start = req_start
+        actual_end = req_start
+    else:
+        content = "".join(sub_lines[:included_count])
+        actual_start = req_start
+        actual_end = req_start + included_count - 1
+
+    is_truncated = (
+        len(content) < total_chars
+        or actual_start > 1
+        or actual_end < total_lines
+    )
+
+    line_range_str = (
+        f"Line {actual_start}"
+        if actual_start == actual_end
+        else f"Lines {actual_start}-{actual_end}"
+    )
+    preview = f"{line_range_str} of {total_lines} ({len(content)} of {total_chars} chars)"
+
+    return {
+        "content": content,
+        "preview": preview,
+        "start_line": actual_start,
+        "end_line": actual_end,
+        "total_lines": total_lines,
+        "total_chars": total_chars,
+        "is_truncated": is_truncated,
+    }
+
+
 class SandboxTool:
     """
     Isolated execution environment for System 1 code verification.
@@ -211,20 +294,35 @@ class SandboxTool:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def read_file(self, filename: str, max_chars: int = 3500) -> dict[str, Any]:
-        """Reads a file from the sandbox directory."""
+    def read_file(
+        self,
+        filename: str,
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+        max_chars: Optional[int] = 3500,
+    ) -> dict[str, Any]:
+        """Reads a file from the sandbox directory with optional line range slicing."""
         try:
             target = self._resolve_safe_path(filename)
             if not target.exists() or not target.is_file():
                 return {"success": False, "error": f"File '{filename}' does not exist in sandbox."}
             content = target.read_text(encoding="utf-8", errors="replace")
-            is_truncated = len(content) > max_chars
+            sliced = slice_text_by_lines(
+                content,
+                start_line=start_line,
+                end_line=end_line,
+                max_chars=max_chars,
+            )
             return {
                 "success": True,
                 "filename": filename,
-                "content": content[:max_chars],
-                "is_truncated": is_truncated,
-                "total_chars": len(content),
+                "preview": sliced["preview"],
+                "content": sliced["content"],
+                "start_line": sliced["start_line"],
+                "end_line": sliced["end_line"],
+                "total_lines": sliced["total_lines"],
+                "total_chars": sliced["total_chars"],
+                "is_truncated": sliced["is_truncated"],
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -426,7 +524,7 @@ class SandboxTool:
         if name in ("python_syntax_check", "syntax_check"):
             code = params.get("code", "")
             if not code and "filename" in params:
-                read_res = self.read_file(params["filename"])
+                read_res = self.read_file(params["filename"], max_chars=None)
                 code = read_res.get("content", "")
             if not code:
                 return "Error: No code provided for syntax checking."
@@ -446,7 +544,7 @@ class SandboxTool:
             filename = params.get("filename", "_snippet.py")
             timeout = params.get("timeout")
             if not code and filename and filename != "_snippet.py":
-                file_res = self.read_file(filename)
+                file_res = self.read_file(filename, max_chars=None)
                 if file_res.get("success"):
                     code = file_res.get("content", "")
             if not code:
@@ -496,11 +594,17 @@ class SandboxTool:
             fn = params.get("filename")
             if not fn:
                 return "Error: 'filename' parameter is required."
-            res = self.read_file(fn, max_chars=params.get("max_chars", 3500))
+            res = self.read_file(
+                fn,
+                start_line=params.get("start_line"),
+                end_line=params.get("end_line"),
+                max_chars=params.get("max_chars", 3500),
+            )
             if "error" in res:
                 return f"Error reading file `{fn}`: {res['error']}"
-            trunc = " *(Truncated)*" if res.get("is_truncated") else ""
-            return f"### Sandbox File: `{fn}`{trunc}\n\n```python\n{res['content']}\n```"
+            preview_meta = res.get("preview", "")
+            header = f"### Sandbox File: `{fn}` ({preview_meta})\n\n" if preview_meta else f"### Sandbox File: `{fn}`\n\n"
+            return f"{header}```python\n{res['content']}\n```"
 
         elif name in ("sandbox_list_files", "list_files"):
             files = self.list_files()
